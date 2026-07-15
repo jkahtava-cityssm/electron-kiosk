@@ -1,38 +1,34 @@
-const { app, BrowserWindow, Menu, dialog } = require("electron");
+const { app, BrowserWindow, Menu, dialog, ipcMain } = require("electron");
+const fs = require("fs");
+const path = require("path");
 
-function parseOnlyUrlArg(argv) {
-  // Account for Electron/Node entry points: [exe, entry, ...args]
-  const userArgs = argv.slice(process.defaultApp ? 2 : 1);
-  let urlValue = null;
-  let consumedIndex = -1;
+const CONFIG_PATH = path.join(app.getPath("userData"), "config.json");
 
-  for (let i = 0; i < userArgs.length; i++) {
-    const arg = userArgs[i];
-
-    if (arg.startsWith("--url=")) {
-      urlValue = arg.split("=")[1];
-      consumedIndex = i;
-    } else if (arg === "--url") {
-      const next = userArgs[i + 1];
-      if (!next || next.startsWith("--")) throw new Error("Missing value for --url");
-      urlValue = next;
-      consumedIndex = i;
-      i++; // Skip the value in next iteration
-    } else {
-      // If we encounter any other flag or unexpected positional arg
-      throw new Error(`Unexpected argument: ${arg}`);
-    }
-  }
-
-  if (!urlValue) throw new Error("Required option --url is missing");
-
+// Helper: Read configured URL
+function getConfiguredUrl() {
   try {
-    return { url: new URL(urlValue.trim()).href };
-  } catch {
-    throw new Error(`Invalid URL: ${urlValue}`);
+    if (fs.existsSync(CONFIG_PATH)) {
+      const data = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf-8"));
+      return data.url || null;
+    }
+  } catch (e) {
+    console.error("Failed to read config", e);
+  }
+  return null;
+}
+
+// Helper: Save configured URL
+function saveConfiguredUrl(url) {
+  try {
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify({ url: url.trim() }), "utf-8");
+    return true;
+  } catch (e) {
+    dialog.showErrorBox("Error", "Failed to save configuration.");
+    return false;
   }
 }
 
+// Create the main Kiosk window
 const createWindow = (url) => {
   const win = new BrowserWindow({
     fullscreen: true,
@@ -40,35 +36,88 @@ const createWindow = (url) => {
     alwaysOnTop: true,
     webPreferences: {
       contextIsolation: true,
-      nodeIntegration: false, // Security best practice
+      nodeIntegration: false,
     },
   });
 
   win.webContents.on("did-fail-load", (event, errorCode, errorDescription) => {
-    console.error(`Page failed to load: ${errorDescription}`);
     dialog.showErrorBox("Network Error", `Failed to load ${url}: ${errorDescription}`);
   });
 
   win.loadURL(url);
 };
 
+// Create a small, clean setup window if no URL is set
+const createSetupWindow = () => {
+  const setupWin = new BrowserWindow({
+    width: 500,
+    height: 300,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    modal: true,
+    title: "Kiosk Setup",
+    webPreferences: {
+      nodeIntegration: true, // Simple for setup window
+      contextIsolation: false,
+    },
+  });
+
+  // Inline HTML for the setup UI
+  const htmlContent = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <style>
+        body { font-family: sans-serif; padding: 20px; background: #f3f4f6; color: #333; }
+        h3 { margin-top: 0; }
+        input { width: 100%; padding: 10px; margin: 10px 0; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
+        button { background: #0076ff; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; float: right;}
+        button:hover { background: #0060d0; }
+      </style>
+    </head>
+    <body>
+      <h3>Configure Kiosk URL</h3>
+      <p>Please enter the default URL for this kiosk display:</p>
+      <input type="url" id="urlInput" placeholder="https://example.com" value="https://">
+      <button onclick="save()">Save & Launch</button>
+
+      <script>
+        const { ipcRenderer } = require('electron');
+        function save() {
+          const url = document.getElementById('urlInput').value;
+          if (url.startsWith('http://') || url.startsWith('https://')) {
+            ipcRenderer.send('save-url', url);
+          } else {
+            alert('Please enter a valid URL starting with http:// or https://');
+          }
+        }
+      </script>
+    </body>
+    </html>
+  `;
+
+  setupWin.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(htmlContent)}`);
+};
+
 app.whenReady().then(() => {
   Menu.setApplicationMenu(Menu.buildFromTemplate([]));
 
-  let command = null;
+  // Handle URL registration from the setup window
+  ipcMain.on("save-url", (event, url) => {
+    if (saveConfiguredUrl(url)) {
+      app.relaunch();
+      app.exit();
+    }
+  });
 
-  try {
-    command = parseOnlyUrlArg(process.argv);
-    createWindow(command.url);
-  } catch (err) {
-    // Use console.error for visibility in terminal
+  // Main logic
+  const savedUrl = getConfiguredUrl();
 
-    dialog.showErrorBox("Launch Error", err.message);
-
-    console.error(`\x1b[31m[Launch Error]: ${err.message}\x1b[0m`);
-
-    // Exit immediately before the app is ready
-    app.quit();
+  if (savedUrl) {
+    createWindow(savedUrl);
+  } else {
+    createSetupWindow();
   }
 });
 

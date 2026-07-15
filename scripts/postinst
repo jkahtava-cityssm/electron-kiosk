@@ -1,0 +1,21 @@
+#!/bin/bash
+# scripts/postinst
+
+USER_HOME=$(eval echo "~${SUDO_USER}")
+
+if [ -n "$SUDO_USER" ] && [ -d "$USER_HOME" ]; then
+  AUTOSTART_DIR="$USER_HOME/.config/autostart"
+  mkdir -p "$AUTOSTART_DIR"
+
+  cat <<EOF > "$AUTOSTART_DIR/electron-kiosk.desktop"
+[Desktop Entry]
+Type=Application
+Name=Electron Kiosk
+Comment=Launches kiosk application at startup
+Exec=electron-kiosk
+Terminal=false
+X-GNOME-Autostart-enabled=true
+EOF
+
+  chown -R $SUDO_USER:$SUDO_USER "$AUTOSTART_DIR/electron-kiosk.desktop"
+fi

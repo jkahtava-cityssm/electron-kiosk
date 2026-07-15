@@ -1,0 +1,14 @@
+Create a copy of: 
+setup-kiosk.sh 
+
+Make executable: 
+sudo chmod +x setup-kiosk.sh
+
+Run: 
+sudo ./setup-kiosk.sh
+
+Restart
+
+To Exit HOLD:
+
+Ctrl + Alt + Shift + E

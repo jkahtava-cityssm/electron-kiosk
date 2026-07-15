@@ -1,0 +1,42 @@
+name: Build and Release Kiosk App
+
+on:
+  push:
+    tags:
+      - "v*" # Triggers the build only when you push a tag like v1.0.0
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write # Allows GitHub to upload files to your Releases page
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: Install system build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg fakeroot rpm
+
+      - name: Install project dependencies
+        run: npm ci
+
+      - name: Compile and package with Electron Forge
+        run: npm run make
+
+      - name: Create GitHub Release and Upload Installer
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            out/make/deb/x64/*.deb
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

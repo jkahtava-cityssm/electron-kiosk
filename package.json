@@ -25,5 +25,23 @@
   },
   "dependencies": {
     "electron-squirrel-startup": "^1.0.1"
+  },
+  "config": {
+    "forge": {
+      "packagerConfig": {
+        "asar": true
+      },
+      "makers": [
+        {
+          "name": "@electron-forge/maker-deb",
+          "config": {
+            "options": {
+              "maintainer": "j.kahtava@cityssm.on.ca",
+              "homepage": "https://github.com/jkahtava-cityssm/electron-kiosk"
+            }
+          }
+        }
+      ]
+    }
   }
 }

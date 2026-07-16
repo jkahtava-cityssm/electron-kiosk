@@ -24,9 +24,9 @@ fi
 
 echo "=== Starting Linux Mint Openbox Kiosk Setup ==="
 
-# 1. Install Openbox and temporary tools
-echo "Installing Openbox and temporary setup tools (curl, jq)..."
-apt update && apt install -y openbox curl jq
+# 1. Install Openbox, Zenity, wmctrl, and temporary setup tools
+echo "Installing Openbox, Zenity, wmctrl, and setup tools..."
+apt update && apt install -y openbox zenity wmctrl curl jq
 
 echo "Fetching latest release details from GitHub..."
 DEB_URL=$(curl -s https://api.github.com/repos/jkahtava-cityssm/electron-kiosk/releases/latest \
@@ -69,13 +69,13 @@ fi
 # Add the kiosk user to the passwordless login group
 usermod -aG nopasswdlogin "$KIOSK_USER"
 
-# 4. Create Openbox directories and add the custom Ctrl+Alt+Shift+E Keybind
+# 4. Create Openbox directories and add the custom Keybinds
 echo "Configuring Openbox keybindings for the kiosk user..."
 OB_CONFIG_DIR="/home/$KIOSK_USER/.config/openbox"
 mkdir -p "$OB_CONFIG_DIR"
 
 # Generate an Openbox configuration mapping:
-# - C-A-S-e (Ctrl+Alt+Shift+E) to logout countdown
+# - C-A-S-e (Ctrl+Alt+Shift+E) to standard logout confirmation prompt
 # - C-A-S-r (Ctrl+Alt+Shift+R) to restart electron-kiosk
 cat << EOF > "$OB_CONFIG_DIR/rc.xml"
 <?xml version="1.0" encoding="UTF-8"?>
@@ -84,7 +84,7 @@ cat << EOF > "$OB_CONFIG_DIR/rc.xml"
     <!-- Admin Escape Shortcut: Ctrl + Alt + Shift + E -->
     <keybind key="C-A-S-e">
       <action name="Execute">
-        <command>/usr/local/bin/kiosk-logout-countdown.sh</command>
+        <command>/usr/local/bin/kiosk-logout-prompt.sh</command>
       </action>
     </keybind>
     <!-- Kiosk Restart Shortcut: Ctrl + Alt + Shift + R -->
@@ -94,30 +94,75 @@ cat << EOF > "$OB_CONFIG_DIR/rc.xml"
       </action>
     </keybind>
   </keyboard>
+  <applications>
+    <!-- Force Zenity dialogs to stay focused, centered, and always on top of the Electron kiosk -->
+    <application class="Zenity" name="zenity">
+      <focus>yes</focus>
+      <layer>above</layer>
+      <center>yes</center>
+    </application>
+  </applications>
 </openbox_config>
 EOF
 
-# 5. Create the 5-Second Countdown Script
-echo "Creating the admin countdown helper script..."
-cat << 'EOF' > /usr/local/bin/kiosk-logout-countdown.sh
+# 5. Create the Interactive Logout Prompt Script (with multi-launch avoidance & focus forcing)
+echo "Creating the admin logout prompt script..."
+cat << 'EOF' > /usr/local/bin/kiosk-logout-prompt.sh
 #!/bin/bash
-export DISPLAY=:0
 
-# Display a 5-second progress countdown dialog
+# Define a self-cleaning lock directory path using the user's systemd runtime directory
+USER_UID=$(id -u)
+RUNTIME_DIR="/run/user/$USER_UID"
+
+if [ -d "$RUNTIME_DIR" ]; then
+    LOCKDIR="$RUNTIME_DIR/kiosk_logout_prompt.lock"
+else
+    LOCKDIR="/tmp/kiosk_logout_prompt_$USER_UID.lock"
+fi
+
+# Prevent multiple dialogs from spawning if the keys are held down
+if ! mkdir "$LOCKDIR" 2>/dev/null; then
+    # Another instance of this dialog is already open. 
+    # Instead of exiting silently, let's aggressively bring the existing Zenity dialog to the front!
+    wmctrl -R "Admin Verification" 2>/dev/null
+    exit 0
+fi
+
+# Ensure the lock directory is deleted on standard cancel/close events
+trap 'rmdir "$LOCKDIR" 2>/dev/null' EXIT
+
+# Background helper: Wait briefly for the Zenity window to spawn, then force it to focus & layer on top
 (
-for i in {1..5}; do
-    echo "$((i * 20))"
-    echo "# Switching to Login in $((5 - i)) seconds..."
-    sleep 1
-done
-) | zenity --progress --title="Admin Verification" --text="Initializing..." --percentage=0 --timeout=5 --auto-close --width=350 --no-cancel
+    # Poll up to 1.5 seconds for the window to appear
+    for i in {1..15}; do
+        if wmctrl -l | grep -q "Admin Verification"; then
+            # Found it! Bring to current desktop, raise window, set 'always on top', and focus keyboard
+            wmctrl -R "Admin Verification"
+            wmctrl -a "Admin Verification"
+            wmctrl -r "Admin Verification" -b add,above
+            break
+        fi
+        sleep 0.1
+    done
+) &
 
-# If the countdown finishes without being forced shut or interrupted, switch to the greeter
+# Use zenity to pop up a clean, modern question dialog box
+zenity --question \
+       --title="Admin Verification" \
+       --text="Are you sure you want to end this session?" \
+       --ok-label="Log Out" \
+       --cancel-label="Cancel" \
+       --width=350
+
 if [ $? -eq 0 ]; then
+    # Manually clean up right before triggering the kill switch, 
+    # though systemd will wipe the /run/user/UID directory anyway!
+    rmdir "$LOCKDIR" 2>/dev/null
     loginctl terminate-session self
 fi
 EOF
-chmod +x /usr/local/bin/kiosk-logout-countdown.sh
+
+chmod +x /usr/local/bin/kiosk-logout-prompt.sh
 
 # 6. Pre-configure the Electron App's config.json
 echo "Pre-configuring Electron application URL..."
@@ -137,8 +182,10 @@ echo "Creating kiosk launch script..."
 cat << 'EOF' > /usr/local/bin/kiosk-session.sh
 #!/bin/bash
 
-# Give the display server a moment to fully initialize
-#sleep 3
+# Extra fail-safe cleanup: Clear user's session-lock when starting up
+uid=$(id -u)
+rm -rf "/run/user/$uid/kiosk_logout_prompt.lock"
+rm -rf "/tmp/kiosk_logout_prompt_$uid.lock"
 
 # Force standard environment pathing and map to primary display
 export DISPLAY=:0
@@ -165,7 +212,7 @@ chmod +x /usr/local/bin/kiosk-session.sh
 echo "Creating the session-wrapper override script..."
 cat << 'EOF' > /usr/local/bin/kiosk-session-wrapper.sh
 #!/bin/bash
-# $1 is the path to the session executable passed by LightDM (e.g., /usr/local/bin/kiosk-session.sh)
+# $1 is the path to the session executable passed by LightDM
 
 case "$USER" in
     kiosk)
@@ -180,6 +227,29 @@ esac
 EOF
 
 chmod +x /usr/local/bin/kiosk-session-wrapper.sh
+
+
+# 7.8 Create a LightDM Login Cleanup Script
+# This runs as root whenever ANY user logs in, completely deleting any persistent locks.
+echo "Creating the LightDM session-setup cleaner hook..."
+cat << 'EOF' > /usr/local/bin/kiosk-login-cleanup.sh
+#!/bin/bash
+# This script is executed by LightDM as root immediately before a session starts.
+
+# 1. Clean up temporary directory locks for all potential login users
+rm -rf /tmp/kiosk_logout_prompt_*.lock
+
+# 2. Clean up dynamic user runtime directory locks
+for user_dir in /run/user/*; do
+    if [ -d "$user_dir" ]; then
+        rm -rf "$user_dir/kiosk_logout_prompt.lock"
+    fi
+done
+
+exit 0
+EOF
+
+chmod +x /usr/local/bin/kiosk-login-cleanup.sh
 
 
 # 8. Create the strict XSession desktop file with NoDisplay enabled
@@ -236,7 +306,7 @@ EOF
 # --- CRITICAL XFCE RESET FIX ---
 echo "Forcibly resetting XFCE configurations to Linux Mint defaults for $ADMIN_USER..."
 
-# 1. Stop active XFCE daemons running under the admin user's name so they can't overwrite our files on logout/reboot
+# 1. Stop active XFCE daemons running under the admin user's name
 pkill -u "$ADMIN_USER" -x xfce4-panel
 pkill -u "$ADMIN_USER" -x xfconfd
 pkill -u "$ADMIN_USER" -x xfsettingsd
@@ -272,6 +342,7 @@ autologin-user-timeout=0
 user-session=kiosk
 autologin-session=kiosk
 session-wrapper=/usr/local/bin/kiosk-session-wrapper.sh
+session-setup-script=/usr/local/bin/kiosk-login-cleanup.sh
 EOF
 
 # 10.5 Generate and lock user .dmrc files
@@ -297,3 +368,19 @@ EOF
 
 echo "=== Setup Complete! ==="
 echo "The system is perfectly integrated. Reboot your computer to test the final kiosk installation."
+
+# Reboot countdown hook
+for i in {10..1}; do
+    echo -ne "Rebooting in $i seconds... Press ANY KEY to cancel the reboot.\r"
+    
+    # -t 1 waits exactly 1 second for a single character input
+    read -r -s -n 1 -t 1 key_pressed
+    if [ $? -eq 0 ]; then
+        echo -e "\n\n[!] Reboot canceled. You can now inspect the system or manually reboot later."
+        exit 0
+    fi
+done
+
+echo -e "\n\nNo key pressed. Rebooting now..."
+sleep 1
+reboot

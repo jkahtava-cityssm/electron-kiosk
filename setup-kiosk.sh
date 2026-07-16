@@ -246,6 +246,22 @@ for user_dir in /run/user/*; do
     fi
 done
 
+# 3. IF the logging-in user is the kiosk, reset their profile to the master template
+if [ "$USER" = "kiosk" ]; then
+    if [ -d "/opt/kiosk_template" ]; then
+        echo "Resetting kiosk user profile..."
+        
+        # Safely delete all files and hidden dotfiles inside /home/kiosk without deleting /home/kiosk itself
+        find /home/kiosk -mindepth 1 -delete
+        
+        # Copy the master template back in
+        cp -a /opt/kiosk_template/. /home/kiosk/
+        
+        # Force strict kiosk ownership
+        chown -R kiosk:kiosk /home/kiosk
+    fi
+fi
+
 exit 0
 EOF
 
@@ -357,6 +373,13 @@ chmod 644 /home/$KIOSK_USER/.dmrc
 echo -e "[Desktop]\nSession=xfce" > /home/$ADMIN_USER/.dmrc
 chown $ADMIN_USER:$ADMIN_USER /home/$ADMIN_USER/.dmrc
 chmod 644 /home/$ADMIN_USER/.dmrc
+
+# 10.8 Create pristine kiosk home template for stateless resets
+echo "Creating pristine kiosk home directory template..."
+rm -rf /opt/kiosk_template
+mkdir -p /opt/kiosk_template
+cp -a /home/$KIOSK_USER/. /opt/kiosk_template/
+
 
 # 11. Prevent manual desktop/session selection on the LightDM login screen
 echo "Hiding desktop environment session chooser from login screen..."

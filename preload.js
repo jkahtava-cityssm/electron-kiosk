@@ -25,7 +25,7 @@ window.addEventListener("DOMContentLoaded", () => {
   Object.assign(navContainer.style, {
     position: "fixed",
     bottom: "24px",
-    right: "24px",
+    left: "24px", // FIXED: Shifted from "right" to "left"
     zIndex: "99999999",
     display: "flex",
     gap: "6px",
@@ -38,22 +38,23 @@ window.addEventListener("DOMContentLoaded", () => {
     userSelect: "none",
   });
 
-  // 2. Create the Back Icon Button
-  const backBtn = document.createElement("button");
-  backBtn.innerHTML = BACK_ICON;
-  backBtn.setAttribute("aria-label", "Go back to the previous page");
-  styleIconButton(backBtn);
-  backBtn.onclick = () => ipcRenderer.send("kiosk-back");
-
-  // 3. Create the Home Icon Button
+  // 2. Create the Home Icon Button
   const homeBtn = document.createElement("button");
   homeBtn.innerHTML = HOME_ICON;
   homeBtn.setAttribute("aria-label", "Return to the main kiosk home screen");
   styleIconButton(homeBtn);
   homeBtn.onclick = () => ipcRenderer.send("kiosk-home");
 
-  navContainer.appendChild(backBtn);
+  // 3. Create the Back Icon Button
+  const backBtn = document.createElement("button");
+  backBtn.innerHTML = BACK_ICON;
+  backBtn.setAttribute("aria-label", "Go back to the previous page");
+  styleIconButton(backBtn);
+  backBtn.onclick = () => ipcRenderer.send("kiosk-back");
+
+  // Appending Home first, then Back (making Home the leftmost anchor)
   navContainer.appendChild(homeBtn);
+  navContainer.appendChild(backBtn);
   document.body.appendChild(navContainer);
 
   // 4. Polling helper to hide the back button when we are on the landing page

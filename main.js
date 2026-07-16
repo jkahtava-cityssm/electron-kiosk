@@ -2,16 +2,22 @@ const { app, BrowserWindow, Menu, dialog, ipcMain } = require("electron");
 const fs = require("fs");
 const path = require("path");
 
+// --- CRITICAL GOOGLE CHROME COMPATIBILITY ---
 app.commandLine.appendSwitch("ignore-gpu-blocklist");
 
+// --- GLOBAL APP STATE & PATHS ---
 const CONFIG_PATH = path.join(app.getPath("userData"), "config.json");
-let mainKioskWindow = null; // Track the primary window
 const LOG_PATH = path.join(app.getPath("userData"), "debug.log");
+let mainKioskWindow = null;
+let kioskReloadTimeout = null; // Declared globally to prevent infinite timers/crashes
 
 // Robust User-Agent Spoofing String
 const cleanChromeUA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
 
+/**
+ * Append messages to debug.log
+ */
 function logToFile(message) {
   const timestamp = new Date().toISOString();
   const logMessage = `[${timestamp}] ${message}\n`;
@@ -20,6 +26,67 @@ function logToFile(message) {
     fs.appendFileSync(LOG_PATH, logMessage, "utf-8");
   } catch (err) {
     console.error("Failed to write to debug.log", err);
+  }
+}
+
+/**
+ * Clean and strip tracking parameters from any URL, logging every action.
+ */
+function sanitizeAndCleanUrl(rawUrl, contextName = "Navigation") {
+  try {
+    const parsedUrl = new URL(rawUrl);
+
+    // Tracking prefixes and exact keys to purge
+    const trackingPrefixes = ["utm_", "_hs", "mc_"];
+    const exactTrackingKeys = [
+      "_gl",
+      "_ga",
+      "_gac",
+      "gclid",
+      "gclsrc",
+      "dclid",
+      "wbraid",
+      "gbraid",
+      "fbclid",
+      "msclkid",
+      "ttclid",
+      "sc_cid",
+    ];
+
+    let altered = false;
+    const keysToDelete = [];
+
+    // Identify tracking parameters
+    parsedUrl.searchParams.forEach((value, key) => {
+      const lowerKey = key.toLowerCase();
+      const isTracking =
+        exactTrackingKeys.includes(lowerKey) || trackingPrefixes.some((prefix) => lowerKey.startsWith(prefix));
+
+      if (isTracking) {
+        keysToDelete.push(key);
+      }
+    });
+
+    // Delete identified tracking parameters
+    if (keysToDelete.length > 0) {
+      keysToDelete.forEach((key) => parsedUrl.searchParams.delete(key));
+      altered = true;
+    }
+
+    const finalUrl = parsedUrl.toString();
+
+    if (altered) {
+      logToFile(
+        `[${contextName}] SUCCESS: Stripped ${keysToDelete.length} parameter(s) [${keysToDelete.join(", ")}]. Resulting URL: ${finalUrl}`,
+      );
+    } else {
+      logToFile(`[${contextName}] PASS: No tracking parameters present in: ${rawUrl}`);
+    }
+
+    return { success: true, url: finalUrl, altered };
+  } catch (e) {
+    logToFile(`[${contextName}] ERROR: Failed to parse URL "${rawUrl}" - Error: ${e.message}`);
+    return { success: false, url: rawUrl, altered: false };
   }
 }
 
@@ -49,6 +116,8 @@ function saveConfiguredUrl(url) {
 
 // Programmatic Child Window Spawner (Guarantees URL is Clean & Configs Match)
 const createChildWindow = (cleanUrl) => {
+  logToFile(`[Child Window] Spawning child window for: ${cleanUrl}`);
+
   const childWindow = new BrowserWindow({
     fullscreen: true,
     kiosk: true,
@@ -63,6 +132,15 @@ const createChildWindow = (cleanUrl) => {
   });
 
   childWindow.webContents.setUserAgent(cleanChromeUA);
+
+  // Intercept standard link navigations inside child window to strip tracking parameters
+  childWindow.webContents.on("will-navigate", (event, navigationUrl) => {
+    const check = sanitizeAndCleanUrl(navigationUrl, "Child-WillNavigate");
+    if (check.success && check.altered) {
+      event.preventDefault();
+      childWindow.loadURL(check.url);
+    }
+  });
 
   // Apply freeze recovery to child windows
   childWindow.webContents.on("unresponsive", () => {
@@ -97,13 +175,31 @@ const createWindow = (url) => {
 
   mainKioskWindow.webContents.setUserAgent(cleanChromeUA);
 
-  // --- 1. DETECT HANGS/FREEZES ---
+  // --- 1. STRIP PARAMETERS ON STANDARD CLICKED LINKS ---
+  mainKioskWindow.webContents.on("will-navigate", (event, navigationUrl) => {
+    const check = sanitizeAndCleanUrl(navigationUrl, "Main-WillNavigate");
+    if (check.success && check.altered) {
+      event.preventDefault();
+      mainKioskWindow.loadURL(check.url);
+    }
+  });
+
+  // --- 2. STRIP PARAMETERS ON HTTP REDIRECTS ---
+  mainKioskWindow.webContents.on("will-redirect", (event, navigationUrl) => {
+    const check = sanitizeAndCleanUrl(navigationUrl, "Main-Redirect");
+    if (check.success && check.altered) {
+      event.preventDefault();
+      mainKioskWindow.loadURL(check.url);
+    }
+  });
+
+  // --- 3. DETECT HANGS/FREEZES ---
   mainKioskWindow.webContents.on("unresponsive", () => {
     logToFile("Renderer process became unresponsive! Attempting reload...");
     mainKioskWindow.reload();
   });
 
-  // --- 2. DETECT CRASHES OR OUT-OF-MEMORY ---
+  // --- 4. DETECT CRASHES OR OUT-OF-MEMORY ---
   mainKioskWindow.webContents.on("render-process-gone", (event, details) => {
     logToFile(`Renderer process is gone. Reason: ${details.reason}, Exit Code: ${details.exitCode}`);
     if (details.reason !== "clean-exit") {
@@ -112,11 +208,10 @@ const createWindow = (url) => {
     }
   });
 
-  // Self-Healing Fail Safe
+  // Self-Healing Fail Safe (With active timer resetting to avoid overlap memory leaks)
   mainKioskWindow.webContents.on("did-fail-load", (event, code, desc) => {
     logToFile(`Failed to load: ${desc}. Retrying in 5 seconds...`);
 
-    // Clear any pending timeout before creating a new one
     if (kioskReloadTimeout) {
       clearTimeout(kioskReloadTimeout);
     }
@@ -128,69 +223,22 @@ const createWindow = (url) => {
     }, 5000);
   });
 
-  // Intercept new window requests, sanitize URL, and manually launch
+  // --- 5. INTERCEPT NEW POPUPS (Target="_blank" / window.open) ---
   mainKioskWindow.webContents.setWindowOpenHandler(({ url }) => {
-    let cleanUrl = url;
+    logToFile(`[WindowOpenHandler] Intercepted request for popup: ${url}`);
 
-    try {
-      const parsedUrl = new URL(url);
+    const check = sanitizeAndCleanUrl(url, "WindowOpenHandler");
+    createChildWindow(check.url);
 
-      // Tracking prefixes and exact keys to purge
-      const trackingPrefixes = ["utm_", "_hs", "mc_"];
-      const exactTrackingKeys = [
-        "_gl",
-        "_ga",
-        "_gac",
-        "gclid",
-        "gclsrc",
-        "dclid",
-        "wbraid",
-        "gbraid",
-        "fbclid",
-        "msclkid",
-        "ttclid",
-        "sc_cid",
-      ];
-
-      let altered = false;
-      const keysToDelete = [];
-
-      // Identify tracking parameters
-      parsedUrl.searchParams.forEach((value, key) => {
-        const lowerKey = key.toLowerCase();
-        const isTracking =
-          exactTrackingKeys.includes(lowerKey) || trackingPrefixes.some((prefix) => lowerKey.startsWith(prefix));
-
-        if (isTracking) {
-          keysToDelete.push(key);
-        }
-      });
-
-      // Delete identified tracking parameters
-      if (keysToDelete.length > 0) {
-        keysToDelete.forEach((key) => parsedUrl.searchParams.delete(key));
-        altered = true;
-      }
-
-      if (altered) {
-        cleanUrl = parsedUrl.toString();
-        logToFile(`Cleaned ${keysToDelete.length} tracking parameters. URL: ${cleanUrl}`);
-      }
-    } catch (e) {
-      logToFile(`Failed to parse URL for cleaning: ${url}`);
-    }
-
-    // Hand off the sanitized URL to our custom child window generator
-    createChildWindow(cleanUrl);
-
-    // Deny the default native popup so Electron doesn't open a duplicate, dirty window
     return { action: "deny" };
   });
 
-  mainKioskWindow.loadURL(url);
+  // Boot load the main window
+  const bootCheck = sanitizeAndCleanUrl(url, "BootLoad");
+  mainKioskWindow.loadURL(bootCheck.url);
 };
 
-// Create setup window if no URL is set
+// Create setup window (Secured, Sandbox-Compliant)
 const createSetupWindow = () => {
   const setupWin = new BrowserWindow({
     width: 500,
@@ -201,45 +249,13 @@ const createSetupWindow = () => {
     modal: true,
     title: "Kiosk Setup",
     webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false,
+      nodeIntegration: false, // Secured
+      contextIsolation: true, // Secured
+      preload: path.join(__dirname, "setup-preload.js"),
     },
   });
 
-  const htmlContent = `
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <style>
-        body { font-family: sans-serif; padding: 20px; background: #f3f4f6; color: #333; }
-        h3 { margin-top: 0; }
-        input { width: 100%; padding: 10px; margin: 10px 0; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
-        button { background: #0076ff; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; float: right;}
-        button:hover { background: #0060d0; }
-      </style>
-    </head>
-    <body>
-      <h3>Configure Kiosk URL</h3>
-      <p>Please enter the default URL for this kiosk display:</p>
-      <input type="url" id="urlInput" placeholder="https://example.com" value="https://">
-      <button onclick="save()">Save & Launch</button>
-
-      <script>
-        const { ipcRenderer } = require('electron');
-        function save() {
-          const url = document.getElementById('urlInput').value;
-          if (url.startsWith('http://') || url.startsWith('https://')) {
-            ipcRenderer.send('save-url', url);
-          } else {
-            alert('Please enter a valid URL starting with http:// or https://');
-          }
-        }
-      </script>
-    </body>
-    </html>
-  `;
-
-  setupWin.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(htmlContent)}`);
+  setupWin.loadFile(path.join(__dirname, "setup.html"));
 };
 
 // IPC Global Event Navigation Management
@@ -254,13 +270,13 @@ app.whenReady().then(() => {
     }
   });
 
-  // Handle Back Navigation
+  // Handle Back Navigation (Safely checks navigationHistory API)
   ipcMain.on("kiosk-back", (event) => {
     const webContents = event.sender;
-    const { navigationHistory } = webContents;
+    const history = webContents.navigationHistory;
 
-    if (navigationHistory.canGoBack()) {
-      navigationHistory.goBack();
+    if (history && history.canGoBack()) {
+      history.goBack();
     } else {
       const win = BrowserWindow.fromWebContents(webContents);
       if (win && win !== mainKioskWindow) {
@@ -269,20 +285,21 @@ app.whenReady().then(() => {
     }
   });
 
-  // Handle Home Navigation
+  // Handle Home Navigation (Safely checks navigationHistory API)
   ipcMain.on("kiosk-home", (event) => {
     const webContents = event.sender;
     const win = BrowserWindow.fromWebContents(webContents);
     const savedUrl = getConfiguredUrl();
-
-    const { navigationHistory } = webContents;
+    const history = webContents.navigationHistory;
 
     if (win && savedUrl) {
       if (win !== mainKioskWindow) {
         win.close();
       } else {
         win.loadURL(savedUrl);
-        navigationHistory.clear();
+        if (history) {
+          history.clear();
+        }
 
         webContents.session.clearStorageData({
           storages: ["cookies", "localstorage", "cache"],
@@ -295,12 +312,12 @@ app.whenReady().then(() => {
   ipcMain.handle("kiosk-can-go-back", (event) => {
     const webContents = event.sender;
     const win = BrowserWindow.fromWebContents(webContents);
-    const { navigationHistory } = webContents;
+    const history = webContents.navigationHistory;
 
     if (win && win !== mainKioskWindow) {
       return true;
     }
-    return navigationHistory.canGoBack();
+    return history ? history.canGoBack() : false;
   });
 
   const savedUrl = getConfiguredUrl();

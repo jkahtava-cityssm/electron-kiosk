@@ -3,6 +3,7 @@ const fs = require("fs");
 const path = require("path");
 
 const CONFIG_PATH = path.join(app.getPath("userData"), "config.json");
+let mainKioskWindow = null; // Track the primary window
 
 // Helper: Read configured URL
 function getConfiguredUrl() {
@@ -30,7 +31,7 @@ function saveConfiguredUrl(url) {
 
 // Create the main Kiosk window
 const createWindow = (url) => {
-  const win = new BrowserWindow({
+  mainKioskWindow = new BrowserWindow({
     fullscreen: true,
     kiosk: true,
     alwaysOnTop: true,
@@ -41,34 +42,35 @@ const createWindow = (url) => {
     },
   });
 
-  win.webContents.on("did-fail-load", (event, errorCode, errorDescription) => {
+  mainKioskWindow.webContents.on("did-fail-load", (event, errorCode, errorDescription) => {
     dialog.showErrorBox("Network Error", `Failed to load ${url}: ${errorDescription}`);
   });
 
-  // Force links targeting new windows/tabs to load in the current window
-  win.webContents.setWindowOpenHandler(({ url }) => {
-    win.loadURL(url);
-    return { action: "deny" };
+  // Intercept new window requests natively and apply kiosk constraints
+  mainKioskWindow.webContents.setWindowOpenHandler(({ url }) => {
+    return {
+      action: "allow",
+      overrideBrowserWindowOptions: {
+        fullscreen: true,
+        kiosk: true,
+        alwaysOnTop: true,
+        webPreferences: {
+          preload: path.join(__dirname, "preload.js"), // Inject the nav controls to child windows
+          contextIsolation: true,
+          nodeIntegration: false,
+        },
+      },
+    };
   });
 
-  // Handle Back Navigation
-  ipcMain.on("kiosk-back", () => {
-    if (win.webContents.canGoBack()) {
-      win.webContents.goBack();
-    }
+  mainKioskWindow.webContents.on("did-fail-load", (event, code, desc) => {
+    console.log(`Failed to load: ${desc}. Retrying in 5 seconds...`);
+    setTimeout(() => {
+      mainKioskWindow.reload();
+    }, 5000);
   });
 
-  // Handle Home Navigation (reloads the initial configured URL)
-  ipcMain.on("kiosk-home", () => {
-    win.loadURL(url);
-  });
-
-  // Tell preload script if back button should be visible
-  ipcMain.handle("kiosk-can-go-back", () => {
-    return win.webContents.canGoBack();
-  });
-
-  win.loadURL(url);
+  mainKioskWindow.loadURL(url);
 };
 
 // Create a small, clean setup window if no URL is set
@@ -82,7 +84,7 @@ const createSetupWindow = () => {
     modal: true,
     title: "Kiosk Setup",
     webPreferences: {
-      nodeIntegration: true, // Simple for setup window
+      nodeIntegration: true,
       contextIsolation: false,
     },
   });
@@ -123,6 +125,7 @@ const createSetupWindow = () => {
   setupWin.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(htmlContent)}`);
 };
 
+// IPC Global Event Navigation Management
 app.whenReady().then(() => {
   Menu.setApplicationMenu(Menu.buildFromTemplate([]));
 
@@ -132,6 +135,58 @@ app.whenReady().then(() => {
       app.relaunch();
       app.exit();
     }
+  });
+
+  // Handle Back Navigation (Smart check: handles child windows too!)
+  ipcMain.on("kiosk-back", (event) => {
+    const webContents = event.sender;
+    if (webContents.canGoBack()) {
+      webContents.goBack();
+    } else {
+      // If we can't go back, check if this is a secondary (child) window
+      const win = BrowserWindow.fromWebContents(webContents);
+      if (win && win !== mainKioskWindow) {
+        win.close(); // Close the child window, bringing them back to the main session!
+      }
+    }
+  });
+
+  // Handle Home Navigation
+  ipcMain.on("kiosk-home", (event) => {
+    const webContents = event.sender;
+    const win = BrowserWindow.fromWebContents(webContents);
+    const savedUrl = getConfiguredUrl();
+
+    if (win && savedUrl) {
+      // 1. If inside a child window, just close it to return to main
+      if (win !== mainKioskWindow) {
+        win.close();
+      } else {
+        // 2. If inside the main window, perform the "Reset"
+        // We navigate to 'about:blank' first to wipe the history stack
+        // then load the URL, making it the new "start" point.
+        win.loadURL("about:blank").then(() => {
+          win.loadURL(savedUrl);
+        });
+
+        // Optional: Clear cache/cookies if you want a truly 'clean' session
+        webContents.session.clearStorageData({
+          storages: ["cookies", "localstorage", "cache"],
+        });
+      }
+    }
+  });
+
+  // Help the preload file decide whether to display the back button
+  ipcMain.handle("kiosk-can-go-back", (event) => {
+    const webContents = event.sender;
+    const win = BrowserWindow.fromWebContents(webContents);
+
+    // Always show the back button on secondary windows (so users can close them)
+    if (win && win !== mainKioskWindow) {
+      return true;
+    }
+    return webContents.canGoBack();
   });
 
   const savedUrl = getConfiguredUrl();

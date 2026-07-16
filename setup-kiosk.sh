@@ -11,6 +11,17 @@ KIOSK_USER="kiosk"
 KIOSK_URL="https://ssmpl.bibliocommons.com"
 # =================================================
 
+# Detect the real user who ran the script with sudo
+IF_SUDO_USER="${SUDO_USER:-$USER}"
+
+if [ "$IF_SUDO_USER" = "root" ] || [ -z "$IF_SUDO_USER" ]; then
+    echo "Warning: You ran this directly as root, so we cannot safely detect your regular admin user."
+    read -p "Please enter your regular admin username: " ADMIN_USER
+else
+    ADMIN_USER="$IF_SUDO_USER"
+    echo "Detected regular admin user: $ADMIN_USER"
+fi
+
 echo "=== Starting Linux Mint Openbox Kiosk Setup ==="
 
 # 1. Install Openbox and temporary tools
@@ -63,7 +74,9 @@ echo "Configuring Openbox keybindings for the kiosk user..."
 OB_CONFIG_DIR="/home/$KIOSK_USER/.config/openbox"
 mkdir -p "$OB_CONFIG_DIR"
 
-# Generate an Openbox configuration mapping C-A-S-e (Ctrl+Alt+Shift+E) to our countdown helper
+# Generate an Openbox configuration mapping:
+# - C-A-S-e (Ctrl+Alt+Shift+E) to logout countdown
+# - C-A-S-r (Ctrl+Alt+Shift+R) to restart electron-kiosk
 cat << EOF > "$OB_CONFIG_DIR/rc.xml"
 <?xml version="1.0" encoding="UTF-8"?>
 <openbox_config xmlns="http://openbox.org/3.4/rc" xmlns:xi="http://www.w3.org/2001/XInclude">
@@ -72,6 +85,12 @@ cat << EOF > "$OB_CONFIG_DIR/rc.xml"
     <keybind key="C-A-S-e">
       <action name="Execute">
         <command>/usr/local/bin/kiosk-logout-countdown.sh</command>
+      </action>
+    </keybind>
+    <!-- Kiosk Restart Shortcut: Ctrl + Alt + Shift + R -->
+    <keybind key="C-A-S-r">
+      <action name="Execute">
+        <command>pkill -f electron-kiosk</command>
       </action>
     </keybind>
   </keyboard>
@@ -95,7 +114,7 @@ done
 
 # If the countdown finishes without being forced shut or interrupted, switch to the greeter
 if [ $? -eq 0 ]; then
-    dm-tool switch-to-greeter
+    loginctl terminate-session self
 fi
 EOF
 chmod +x /usr/local/bin/kiosk-logout-countdown.sh
@@ -119,7 +138,7 @@ cat << 'EOF' > /usr/local/bin/kiosk-session.sh
 #!/bin/bash
 
 # Give the display server a moment to fully initialize
-sleep 3
+#sleep 3
 
 # Force standard environment pathing and map to primary display
 export DISPLAY=:0
@@ -142,7 +161,28 @@ EOF
 
 chmod +x /usr/local/bin/kiosk-session.sh
 
-# 8. Create the strict XSession desktop file
+# 7.5 Create a LightDM session wrapper to force session assignment by username
+echo "Creating the session-wrapper override script..."
+cat << 'EOF' > /usr/local/bin/kiosk-session-wrapper.sh
+#!/bin/bash
+# $1 is the path to the session executable passed by LightDM (e.g., /usr/local/bin/kiosk-session.sh)
+
+case "$USER" in
+    kiosk)
+        # Force the kiosk script no matter what LightDM or .dmrc requested
+        exec /usr/local/bin/kiosk-session.sh
+        ;;
+    *)
+        # Allow admin/other users to run their selected session normally
+        exec "$@"
+        ;;
+esac
+EOF
+
+chmod +x /usr/local/bin/kiosk-session-wrapper.sh
+
+
+# 8. Create the strict XSession desktop file with NoDisplay enabled
 echo "Creating XSession desktop file..."
 cat << EOF > /usr/share/xsessions/kiosk.desktop
 [Desktop Entry]
@@ -153,11 +193,28 @@ Exec=/usr/local/bin/kiosk-session.sh
 Icon=openbox
 Type=Application
 DesktopNames=Openbox
+NoDisplay=true
 EOF
 
-# 9. Explicitly override AccountsService to force XFCE to respect the session choice
-echo "Configuring AccountsService session target..."
+# 8.5 Hide default system sessions from the login menu chooser
+echo "Hiding Openbox and XFCE desktop session choices..."
+for session in "openbox.desktop" "xfce.desktop"; do
+    FILE_PATH="/usr/share/xsessions/$session"
+    if [ -f "$FILE_PATH" ]; then
+        # Remove any existing NoDisplay entry to prevent duplicates, then append it fresh
+        sed -i '/^NoDisplay=/d' "$FILE_PATH"
+        echo "NoDisplay=true" >> "$FILE_PATH"
+        echo "-> Successfully modified $session"
+    else
+        echo "-> Warning: $session not found, skipping."
+    fi
+done
+
+# 9. Explicitly override AccountsService targets for both users
+echo "Configuring AccountsService session targets..."
 mkdir -p /var/lib/AccountsService/users
+
+# Configure Kiosk user session target
 cat << EOF > /var/lib/AccountsService/users/$KIOSK_USER
 [User]
 Session=kiosk
@@ -166,14 +223,76 @@ Icon=/usr/share/pixmaps/faces/user-generic.png
 SystemAccount=false
 EOF
 
+# Configure Admin user session target to force Xfce
+echo "Configuring AccountsService session target for $ADMIN_USER..."
+cat << EOF > /var/lib/AccountsService/users/$ADMIN_USER
+[User]
+Session=xfce
+XSession=xfce
+Icon=/usr/share/pixmaps/faces/user-generic.png
+SystemAccount=false
+EOF
+
+# --- CRITICAL XFCE RESET FIX ---
+echo "Forcibly resetting XFCE configurations to Linux Mint defaults for $ADMIN_USER..."
+
+# 1. Stop active XFCE daemons running under the admin user's name so they can't overwrite our files on logout/reboot
+pkill -u "$ADMIN_USER" -x xfce4-panel
+pkill -u "$ADMIN_USER" -x xfconfd
+pkill -u "$ADMIN_USER" -x xfsettingsd
+
+# 2. Clean out the broken configs and cached XFCE session states
+ADMIN_HOME="/home/$ADMIN_USER"
+rm -rf "$ADMIN_HOME/.config/xfce4"
+rm -rf "$ADMIN_HOME/.cache/sessions"
+
+# 3. Create a clean structure and inject Mint's true design defaults
+mkdir -p "$ADMIN_HOME/.config"
+if [ -d "/usr/share/mint-artwork/xfce/xfce4" ]; then
+    cp -r /usr/share/mint-artwork/xfce/xfce4 "$ADMIN_HOME/.config/"
+    echo "-> Successfully restored Linux Mint XFCE system templates"
+else
+    # Fallback to general system configurations if artwork is missing
+    mkdir -p "$ADMIN_HOME/.config/xfce4/xfconf"
+    cp -r /etc/xdg/xfce4/xfconf/xfce-perchannel-xml "$ADMIN_HOME/.config/xfce4/xfconf/"
+    echo "-> Fallback: copied standard system etc/xdg profiles"
+fi
+
+# 4. Correctly lock permissions to the Admin User
+chown -R "$ADMIN_USER:$ADMIN_USER" "$ADMIN_HOME/.config"
+# -------------------------------
+
 # 10. Configure LightDM for automatic login
 echo "Configuring LightDM auto-login..."
 mkdir -p /etc/lightdm/lightdm.conf.d
 cat << EOF > /etc/lightdm/lightdm.conf.d/70-kiosk.conf
-[SeatDefaults]
+[Seat:*]
 autologin-user=$KIOSK_USER
 autologin-user-timeout=0
 user-session=kiosk
+autologin-session=kiosk
+session-wrapper=/usr/local/bin/kiosk-session-wrapper.sh
+EOF
+
+# 10.5 Generate and lock user .dmrc files
+echo "Seeding default .dmrc session files..."
+
+# Kiosk .dmrc
+echo -e "[Desktop]\nSession=kiosk" > /home/$KIOSK_USER/.dmrc
+chown $KIOSK_USER:$KIOSK_USER /home/$KIOSK_USER/.dmrc
+chmod 644 /home/$KIOSK_USER/.dmrc
+
+# Admin .dmrc
+echo -e "[Desktop]\nSession=xfce" > /home/$ADMIN_USER/.dmrc
+chown $ADMIN_USER:$ADMIN_USER /home/$ADMIN_USER/.dmrc
+chmod 644 /home/$ADMIN_USER/.dmrc
+
+# 11. Prevent manual desktop/session selection on the LightDM login screen
+echo "Hiding desktop environment session chooser from login screen..."
+mkdir -p /etc/lightdm
+cat << EOF > /etc/lightdm/slick-greeter.conf
+[Greeter]
+show-sessions=false
 EOF
 
 echo "=== Setup Complete! ==="

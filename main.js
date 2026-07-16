@@ -39,11 +39,26 @@ const createWindow = (url) => {
       contextIsolation: true,
       nodeIntegration: false,
       preload: path.join(__dirname, "preload.js"), // Link the preload script
+      allowRunningInsecureContent: false,
+      webSecurity: true,
     },
   });
 
-  mainKioskWindow.webContents.on("did-fail-load", (event, errorCode, errorDescription) => {
-    dialog.showErrorBox("Network Error", `Failed to load ${url}: ${errorDescription}`);
+  // --- CRITICAL USER-AGENT SPOOFING ---
+  const userAgent = mainKioskWindow.webContents
+    .getUserAgent()
+    .replace(/Electron\/[0-9\.]+\s/, "")
+    .replace(/AppAppName\/[0-9\.]+\s/, "");
+
+  mainKioskWindow.webContents.setUserAgent(userAgent);
+  // ------------------------------------
+
+  // Self-Healing Fail Safe: Logs error and retries without throwing disruptive popup dialogs
+  mainKioskWindow.webContents.on("did-fail-load", (event, code, desc) => {
+    console.log(`Failed to load: ${desc}. Retrying in 5 seconds...`);
+    setTimeout(() => {
+      mainKioskWindow.reload();
+    }, 5000);
   });
 
   // Intercept new window requests natively and apply kiosk constraints
@@ -63,11 +78,9 @@ const createWindow = (url) => {
     };
   });
 
-  mainKioskWindow.webContents.on("did-fail-load", (event, code, desc) => {
-    console.log(`Failed to load: ${desc}. Retrying in 5 seconds...`);
-    setTimeout(() => {
-      mainKioskWindow.reload();
-    }, 5000);
+  // Ensure newly created child windows ALSO inherit our spoofed User-Agent
+  mainKioskWindow.webContents.on("did-create-window", (childWindow) => {
+    childWindow.webContents.setUserAgent(userAgent);
   });
 
   mainKioskWindow.loadURL(url);
@@ -157,19 +170,18 @@ app.whenReady().then(() => {
     const win = BrowserWindow.fromWebContents(webContents);
     const savedUrl = getConfiguredUrl();
 
+    const { navigationHistory } = webContents;
+
     if (win && savedUrl) {
       // 1. If inside a child window, just close it to return to main
       if (win !== mainKioskWindow) {
         win.close();
       } else {
-        // 2. If inside the main window, perform the "Reset"
-        // We navigate to 'about:blank' first to wipe the history stack
-        // then load the URL, making it the new "start" point.
-        win.loadURL("about:blank").then(() => {
-          win.loadURL(savedUrl);
-        });
+        navigationHistory.clear();
 
-        // Optional: Clear cache/cookies if you want a truly 'clean' session
+        win.loadURL(savedUrl);
+
+        // Wipe cache/cookies so the next user gets a brand new session
         webContents.session.clearStorageData({
           storages: ["cookies", "localstorage", "cache"],
         });

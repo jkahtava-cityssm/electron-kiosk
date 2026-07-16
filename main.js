@@ -37,11 +37,35 @@ const createWindow = (url) => {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      preload: path.join(__dirname, "preload.js"), // Link the preload script
     },
   });
 
   win.webContents.on("did-fail-load", (event, errorCode, errorDescription) => {
     dialog.showErrorBox("Network Error", `Failed to load ${url}: ${errorDescription}`);
+  });
+
+  // Force links targeting new windows/tabs to load in the current window
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    win.loadURL(url);
+    return { action: "deny" };
+  });
+
+  // Handle Back Navigation
+  ipcMain.on("kiosk-back", () => {
+    if (win.webContents.canGoBack()) {
+      win.webContents.goBack();
+    }
+  });
+
+  // Handle Home Navigation (reloads the initial configured URL)
+  ipcMain.on("kiosk-home", () => {
+    win.loadURL(url);
+  });
+
+  // Tell preload script if back button should be visible
+  ipcMain.handle("kiosk-can-go-back", () => {
+    return win.webContents.canGoBack();
   });
 
   win.loadURL(url);
@@ -63,7 +87,6 @@ const createSetupWindow = () => {
     },
   });
 
-  // Inline HTML for the setup UI
   const htmlContent = `
     <!DOCTYPE html>
     <html>
@@ -111,7 +134,6 @@ app.whenReady().then(() => {
     }
   });
 
-  // Main logic
   const savedUrl = getConfiguredUrl();
 
   if (savedUrl) {

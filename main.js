@@ -2,19 +2,20 @@ const { app, BrowserWindow, Menu, dialog, ipcMain } = require("electron");
 const fs = require("fs");
 const path = require("path");
 
-// --- CRITICAL GOOGLE CHROME / ZENDESK COMPATIBILITY FLAGS ---
-app.commandLine.appendSwitch("disable-features", "SameSiteByDefaultCookies,CookiesWithoutSameSiteMustBeSecure");
 app.commandLine.appendSwitch("ignore-gpu-blocklist");
 
 const CONFIG_PATH = path.join(app.getPath("userData"), "config.json");
 let mainKioskWindow = null; // Track the primary window
-
 const LOG_PATH = path.join(app.getPath("userData"), "debug.log");
+
+// Robust User-Agent Spoofing String
+const cleanChromeUA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
 
 function logToFile(message) {
   const timestamp = new Date().toISOString();
   const logMessage = `[${timestamp}] ${message}\n`;
-  console.log(logMessage.trim()); // Print to terminal too
+  console.log(logMessage.trim());
   try {
     fs.appendFileSync(LOG_PATH, logMessage, "utf-8");
   } catch (err) {
@@ -46,6 +47,39 @@ function saveConfiguredUrl(url) {
   }
 }
 
+// Programmatic Child Window Spawner (Guarantees URL is Clean & Configs Match)
+const createChildWindow = (cleanUrl) => {
+  const childWindow = new BrowserWindow({
+    fullscreen: true,
+    kiosk: true,
+    alwaysOnTop: true,
+    webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      allowRunningInsecureContent: false,
+      webSecurity: true,
+    },
+  });
+
+  childWindow.webContents.setUserAgent(cleanChromeUA);
+
+  // Apply freeze recovery to child windows
+  childWindow.webContents.on("unresponsive", () => {
+    logToFile(`Child window unresponsive! Reloading: ${cleanUrl}`);
+    childWindow.reload();
+  });
+
+  childWindow.webContents.on("render-process-gone", (event, details) => {
+    if (details.reason !== "clean-exit") {
+      logToFile(`Child window crashed (${details.reason})! Reloading...`);
+      childWindow.reload();
+    }
+  });
+
+  childWindow.loadURL(cleanUrl);
+};
+
 // Create the main Kiosk window
 const createWindow = (url) => {
   mainKioskWindow = new BrowserWindow({
@@ -55,18 +89,13 @@ const createWindow = (url) => {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
-      preload: path.join(__dirname, "preload.js"), // Link the preload script
+      preload: path.join(__dirname, "preload.js"),
       allowRunningInsecureContent: false,
       webSecurity: true,
     },
   });
 
-  // --- CRITICAL USER-AGENT SPOOFING (Robust Version) ---
-  const cleanChromeUA =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
-
   mainKioskWindow.webContents.setUserAgent(cleanChromeUA);
-  // -----------------------------------------------------
 
   // --- 1. DETECT HANGS/FREEZES ---
   mainKioskWindow.webContents.on("unresponsive", () => {
@@ -86,52 +115,82 @@ const createWindow = (url) => {
   // Self-Healing Fail Safe
   mainKioskWindow.webContents.on("did-fail-load", (event, code, desc) => {
     logToFile(`Failed to load: ${desc}. Retrying in 5 seconds...`);
-    setTimeout(() => {
+
+    // Clear any pending timeout before creating a new one
+    if (kioskReloadTimeout) {
+      clearTimeout(kioskReloadTimeout);
+    }
+
+    kioskReloadTimeout = setTimeout(() => {
       if (mainKioskWindow && !mainKioskWindow.isDestroyed()) {
         mainKioskWindow.reload();
       }
     }, 5000);
   });
 
-  // Intercept new window requests natively and apply kiosk constraints
+  // Intercept new window requests, sanitize URL, and manually launch
   mainKioskWindow.webContents.setWindowOpenHandler(({ url }) => {
-    return {
-      action: "allow",
-      overrideBrowserWindowOptions: {
-        fullscreen: true,
-        kiosk: true,
-        alwaysOnTop: true,
-        webPreferences: {
-          preload: path.join(__dirname, "preload.js"), // Inject the nav controls to child windows
-          contextIsolation: true,
-          nodeIntegration: false,
-        },
-      },
-    };
-  });
+    let cleanUrl = url;
 
-  // Ensure newly created child windows ALSO inherit our spoofed User-Agent
-  mainKioskWindow.webContents.on("did-create-window", (childWindow) => {
-    childWindow.webContents.setUserAgent(cleanChromeUA);
+    try {
+      const parsedUrl = new URL(url);
 
-    // Apply the same freeze recovery to child windows
-    childWindow.webContents.on("unresponsive", () => {
-      logToFile("Child window became unresponsive! Reloading...");
-      childWindow.reload();
-    });
+      // Tracking prefixes and exact keys to purge
+      const trackingPrefixes = ["utm_", "_hs", "mc_"];
+      const exactTrackingKeys = [
+        "_gl",
+        "_ga",
+        "_gac",
+        "gclid",
+        "gclsrc",
+        "dclid",
+        "wbraid",
+        "gbraid",
+        "fbclid",
+        "msclkid",
+        "ttclid",
+        "sc_cid",
+      ];
 
-    childWindow.webContents.on("render-process-gone", (event, details) => {
-      if (details.reason !== "clean-exit") {
-        logToFile("Child window crashed! Reloading...");
-        childWindow.reload();
+      let altered = false;
+      const keysToDelete = [];
+
+      // Identify tracking parameters
+      parsedUrl.searchParams.forEach((value, key) => {
+        const lowerKey = key.toLowerCase();
+        const isTracking =
+          exactTrackingKeys.includes(lowerKey) || trackingPrefixes.some((prefix) => lowerKey.startsWith(prefix));
+
+        if (isTracking) {
+          keysToDelete.push(key);
+        }
+      });
+
+      // Delete identified tracking parameters
+      if (keysToDelete.length > 0) {
+        keysToDelete.forEach((key) => parsedUrl.searchParams.delete(key));
+        altered = true;
       }
-    });
+
+      if (altered) {
+        cleanUrl = parsedUrl.toString();
+        logToFile(`Cleaned ${keysToDelete.length} tracking parameters. URL: ${cleanUrl}`);
+      }
+    } catch (e) {
+      logToFile(`Failed to parse URL for cleaning: ${url}`);
+    }
+
+    // Hand off the sanitized URL to our custom child window generator
+    createChildWindow(cleanUrl);
+
+    // Deny the default native popup so Electron doesn't open a duplicate, dirty window
+    return { action: "deny" };
   });
 
   mainKioskWindow.loadURL(url);
 };
 
-// Create a small, clean setup window if no URL is set
+// Create setup window if no URL is set
 const createSetupWindow = () => {
   const setupWin = new BrowserWindow({
     width: 500,
@@ -200,7 +259,7 @@ app.whenReady().then(() => {
     const webContents = event.sender;
     const { navigationHistory } = webContents;
 
-    if (webContents.canGoBack()) {
+    if (navigationHistory.canGoBack()) {
       navigationHistory.goBack();
     } else {
       const win = BrowserWindow.fromWebContents(webContents);
@@ -222,8 +281,8 @@ app.whenReady().then(() => {
       if (win !== mainKioskWindow) {
         win.close();
       } else {
-        navigationHistory.clear();
         win.loadURL(savedUrl);
+        navigationHistory.clear();
 
         webContents.session.clearStorageData({
           storages: ["cookies", "localstorage", "cache"],

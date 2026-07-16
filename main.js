@@ -62,13 +62,10 @@ const createWindow = (url) => {
   });
 
   // --- CRITICAL USER-AGENT SPOOFING (Robust Version) ---
-  const originalUA = mainKioskWindow.webContents.getUserAgent();
-  const userAgent = originalUA
-    .replace(/Electron\/[0-9\.]+(\s|$)/, "")
-    .replace(/AppAppName\/[0-9\.]+(\s|$)/, "")
-    .trim();
+  const cleanChromeUA =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
 
-  mainKioskWindow.webContents.setUserAgent(userAgent);
+  mainKioskWindow.webContents.setUserAgent(cleanChromeUA);
   // -----------------------------------------------------
 
   // --- 1. DETECT HANGS/FREEZES ---
@@ -115,7 +112,7 @@ const createWindow = (url) => {
 
   // Ensure newly created child windows ALSO inherit our spoofed User-Agent
   mainKioskWindow.webContents.on("did-create-window", (childWindow) => {
-    childWindow.webContents.setUserAgent(userAgent);
+    childWindow.webContents.setUserAgent(cleanChromeUA);
 
     // Apply the same freeze recovery to child windows
     childWindow.webContents.on("unresponsive", () => {
@@ -201,8 +198,10 @@ app.whenReady().then(() => {
   // Handle Back Navigation
   ipcMain.on("kiosk-back", (event) => {
     const webContents = event.sender;
+    const { navigationHistory } = webContents;
+
     if (webContents.canGoBack()) {
-      webContents.goBack();
+      navigationHistory.goBack();
     } else {
       const win = BrowserWindow.fromWebContents(webContents);
       if (win && win !== mainKioskWindow) {
@@ -237,11 +236,12 @@ app.whenReady().then(() => {
   ipcMain.handle("kiosk-can-go-back", (event) => {
     const webContents = event.sender;
     const win = BrowserWindow.fromWebContents(webContents);
+    const { navigationHistory } = webContents;
 
     if (win && win !== mainKioskWindow) {
       return true;
     }
-    return webContents.canGoBack();
+    return navigationHistory.canGoBack();
   });
 
   const savedUrl = getConfiguredUrl();

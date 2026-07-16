@@ -2,6 +2,10 @@ const { app, BrowserWindow, Menu, dialog, ipcMain } = require("electron");
 const fs = require("fs");
 const path = require("path");
 
+// --- CRITICAL GOOGLE CHROME / ZENDESK COMPATIBILITY FLAGS ---
+app.commandLine.appendSwitch("disable-features", "SameSiteByDefaultCookies,CookiesWithoutSameSiteMustBeSecure");
+app.commandLine.appendSwitch("ignore-gpu-blocklist");
+
 const CONFIG_PATH = path.join(app.getPath("userData"), "config.json");
 let mainKioskWindow = null; // Track the primary window
 
@@ -44,21 +48,49 @@ const createWindow = (url) => {
     },
   });
 
-  // --- CRITICAL USER-AGENT SPOOFING ---
-  const userAgent = mainKioskWindow.webContents
-    .getUserAgent()
-    .replace(/Electron\/[0-9\.]+\s/, "")
-    .replace(/AppAppName\/[0-9\.]+\s/, "");
+  // --- CRITICAL USER-AGENT SPOOFING (Robust Version) ---
+  const originalUA = mainKioskWindow.webContents.getUserAgent();
+  const userAgent = originalUA
+    .replace(/Electron\/[0-9\.]+(\s|$)/, "")
+    .replace(/AppAppName\/[0-9\.]+(\s|$)/, "")
+    .trim();
 
   mainKioskWindow.webContents.setUserAgent(userAgent);
-  // ------------------------------------
+  // -----------------------------------------------------
 
-  // Self-Healing Fail Safe: Logs error and retries without throwing disruptive popup dialogs
+  // --- 1. DETECT HANGS/FREEZES ---
+  mainKioskWindow.webContents.on("unresponsive", () => {
+    console.warn("Renderer process became unresponsive! Attempting reload...");
+    mainKioskWindow.reload();
+  });
+
+  // --- 2. DETECT CRASHES OR OUT-OF-MEMORY ---
+  mainKioskWindow.webContents.on("render-process-gone", (event, details) => {
+    console.error(`Renderer process is gone. Reason: ${details.reason}, Exit Code: ${details.exitCode}`);
+    if (details.reason !== "clean-exit") {
+      console.log("Re-launching window due to crash...");
+      mainKioskWindow.reload();
+    }
+  });
+
+  // Self-Healing Fail Safe
   mainKioskWindow.webContents.on("did-fail-load", (event, code, desc) => {
     console.log(`Failed to load: ${desc}. Retrying in 5 seconds...`);
     setTimeout(() => {
-      mainKioskWindow.reload();
+      if (mainKioskWindow && !mainKioskWindow.isDestroyed()) {
+        mainKioskWindow.reload();
+      }
     }, 5000);
+  });
+
+  mainKioskWindow.webContents.on("before-input-event", (event, input) => {
+    // If user presses Ctrl+Shift+Alt+I (Windows) or Cmd+Option+Alt+I (Mac)
+    const isShortcut = (input.control || input.meta) && input.shift && input.alt && input.key.toLowerCase() === "i";
+
+    if (isShortcut && input.type === "keyDown") {
+      mainKioskWindow.webContents.toggleDevTools();
+      event.preventDefault(); // Stop the event from bubbling to the website
+    }
   });
 
   // Intercept new window requests natively and apply kiosk constraints
@@ -81,6 +113,19 @@ const createWindow = (url) => {
   // Ensure newly created child windows ALSO inherit our spoofed User-Agent
   mainKioskWindow.webContents.on("did-create-window", (childWindow) => {
     childWindow.webContents.setUserAgent(userAgent);
+
+    // Apply the same freeze recovery to child windows
+    childWindow.webContents.on("unresponsive", () => {
+      console.warn("Child window became unresponsive! Reloading...");
+      childWindow.reload();
+    });
+
+    childWindow.webContents.on("render-process-gone", (event, details) => {
+      if (details.reason !== "clean-exit") {
+        console.error("Child window crashed! Reloading...");
+        childWindow.reload();
+      }
+    });
   });
 
   mainKioskWindow.loadURL(url);
@@ -150,16 +195,15 @@ app.whenReady().then(() => {
     }
   });
 
-  // Handle Back Navigation (Smart check: handles child windows too!)
+  // Handle Back Navigation
   ipcMain.on("kiosk-back", (event) => {
     const webContents = event.sender;
     if (webContents.canGoBack()) {
       webContents.goBack();
     } else {
-      // If we can't go back, check if this is a secondary (child) window
       const win = BrowserWindow.fromWebContents(webContents);
       if (win && win !== mainKioskWindow) {
-        win.close(); // Close the child window, bringing them back to the main session!
+        win.close();
       }
     }
   });
@@ -173,15 +217,12 @@ app.whenReady().then(() => {
     const { navigationHistory } = webContents;
 
     if (win && savedUrl) {
-      // 1. If inside a child window, just close it to return to main
       if (win !== mainKioskWindow) {
         win.close();
       } else {
         navigationHistory.clear();
-
         win.loadURL(savedUrl);
 
-        // Wipe cache/cookies so the next user gets a brand new session
         webContents.session.clearStorageData({
           storages: ["cookies", "localstorage", "cache"],
         });
@@ -194,7 +235,6 @@ app.whenReady().then(() => {
     const webContents = event.sender;
     const win = BrowserWindow.fromWebContents(webContents);
 
-    // Always show the back button on secondary windows (so users can close them)
     if (win && win !== mainKioskWindow) {
       return true;
     }

@@ -9,6 +9,19 @@ app.commandLine.appendSwitch("ignore-gpu-blocklist");
 const CONFIG_PATH = path.join(app.getPath("userData"), "config.json");
 let mainKioskWindow = null; // Track the primary window
 
+const LOG_PATH = path.join(app.getPath("userData"), "debug.log");
+
+function logToFile(message) {
+  const timestamp = new Date().toISOString();
+  const logMessage = `[${timestamp}] ${message}\n`;
+  console.log(logMessage.trim()); // Print to terminal too
+  try {
+    fs.appendFileSync(LOG_PATH, logMessage, "utf-8");
+  } catch (err) {
+    console.error("Failed to write to debug.log", err);
+  }
+}
+
 // Helper: Read configured URL
 function getConfiguredUrl() {
   try {
@@ -17,7 +30,7 @@ function getConfiguredUrl() {
       return data.url || null;
     }
   } catch (e) {
-    console.error("Failed to read config", e);
+    logToFile("Failed to read config", e);
   }
   return null;
 }
@@ -60,37 +73,27 @@ const createWindow = (url) => {
 
   // --- 1. DETECT HANGS/FREEZES ---
   mainKioskWindow.webContents.on("unresponsive", () => {
-    console.warn("Renderer process became unresponsive! Attempting reload...");
+    logToFile("Renderer process became unresponsive! Attempting reload...");
     mainKioskWindow.reload();
   });
 
   // --- 2. DETECT CRASHES OR OUT-OF-MEMORY ---
   mainKioskWindow.webContents.on("render-process-gone", (event, details) => {
-    console.error(`Renderer process is gone. Reason: ${details.reason}, Exit Code: ${details.exitCode}`);
+    logToFile(`Renderer process is gone. Reason: ${details.reason}, Exit Code: ${details.exitCode}`);
     if (details.reason !== "clean-exit") {
-      console.log("Re-launching window due to crash...");
+      logToFile("Re-launching window due to crash...");
       mainKioskWindow.reload();
     }
   });
 
   // Self-Healing Fail Safe
   mainKioskWindow.webContents.on("did-fail-load", (event, code, desc) => {
-    console.log(`Failed to load: ${desc}. Retrying in 5 seconds...`);
+    logToFile(`Failed to load: ${desc}. Retrying in 5 seconds...`);
     setTimeout(() => {
       if (mainKioskWindow && !mainKioskWindow.isDestroyed()) {
         mainKioskWindow.reload();
       }
     }, 5000);
-  });
-
-  mainKioskWindow.webContents.on("before-input-event", (event, input) => {
-    // If user presses Ctrl+Shift+Alt+I (Windows) or Cmd+Option+Alt+I (Mac)
-    const isShortcut = (input.control || input.meta) && input.shift && input.alt && input.key.toLowerCase() === "i";
-
-    if (isShortcut && input.type === "keyDown") {
-      mainKioskWindow.webContents.toggleDevTools();
-      event.preventDefault(); // Stop the event from bubbling to the website
-    }
   });
 
   // Intercept new window requests natively and apply kiosk constraints
@@ -116,13 +119,13 @@ const createWindow = (url) => {
 
     // Apply the same freeze recovery to child windows
     childWindow.webContents.on("unresponsive", () => {
-      console.warn("Child window became unresponsive! Reloading...");
+      logToFile("Child window became unresponsive! Reloading...");
       childWindow.reload();
     });
 
     childWindow.webContents.on("render-process-gone", (event, details) => {
       if (details.reason !== "clean-exit") {
-        console.error("Child window crashed! Reloading...");
+        logToFile("Child window crashed! Reloading...");
         childWindow.reload();
       }
     });

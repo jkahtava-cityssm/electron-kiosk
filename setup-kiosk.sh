@@ -28,6 +28,14 @@ echo "=== Starting Linux Mint Openbox Kiosk Setup ==="
 echo "Installing Openbox, Zenity, wmctrl, and setup tools..."
 apt update && apt install -y openbox zenity wmctrl curl jq
 
+# Check if electron-kiosk is already installed and remove it
+if dpkg -s electron-kiosk &>/dev/null; then
+    echo "Existing installation of electron-kiosk detected. Removing it first..."
+    apt purge -y electron-kiosk
+else
+    echo "No existing installation of electron-kiosk detected."
+fi
+
 echo "Fetching latest release details from GitHub..."
 DEB_URL=$(curl -s https://api.github.com/repos/jkahtava-cityssm/electron-kiosk/releases/latest \
   | jq -r '.assets[] | select(.name | endswith("amd64.deb")) | .browser_download_url')

@@ -17,7 +17,7 @@ Create a copy of `setup-kiosk.sh` or edit it directly to point to your target we
 # ================= CONFIGURATION =================
 
 KIOSK_USER="kiosk"
-KIOSK_URL="[https://your-target-url.com](https://your-target-url.com)"
+KIOSK_URL="https://your-target-url.com"
 
 # =================================================
 ```

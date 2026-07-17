@@ -72,4 +72,3 @@ Because the application runs in a highly restricted full-screen layout, specific
 * **`preload.js`**: Injection script handling high-contrast accessible SVG UI, touchscreen tap tracking, and navigation states.
 * **`setup-kiosk.sh`**: Monolithic automated systems engineer mapping Openbox configurations, window rules (`wmctrl`/`zenity`), and LightDM profile setups.
 
-```

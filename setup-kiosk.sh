@@ -11,6 +11,26 @@ KIOSK_USER="kiosk"
 KIOSK_URL="https://ssmpl.bibliocommons.com"
 # =================================================
 
+# 0. Detect Linux Mint Desktop Environment Flavor
+if [ -f /etc/linuxmint/info ]; then
+    . /etc/linuxmint/info
+fi
+
+if [ "$EDITION" = "Xfce" ]; then
+    echo "Detected Linux Mint XFCE (Lightweight Edition)."
+    ADMIN_SESSION="xfce"
+elif [ "$EDITION" = "Cinnamon" ]; then
+    echo "Detected Linux Mint Cinnamon (Standard Edition)."
+    ADMIN_SESSION="cinnamon"
+elif [ "$EDITION" = "MATE" ]; then
+    echo "Detected Linux Mint MATE (Classic Edition)."
+    ADMIN_SESSION="mate"
+else
+    echo "Error: Unsupported or missing Linux Mint Desktop environment detected ('$EDITION')."
+    echo "This script only supports XFCE, Cinnamon, or MATE. Exiting setup."
+    exit 1
+fi
+
 # Detect the real user who ran the script with sudo
 IF_SUDO_USER="${SUDO_USER:-$USER}"
 
@@ -238,7 +258,6 @@ chmod +x /usr/local/bin/kiosk-session-wrapper.sh
 
 
 # 7.8 Create a LightDM Login Cleanup Script
-# This runs as root whenever ANY user logs in, completely deleting any persistent locks.
 echo "Creating the LightDM session-setup cleaner hook..."
 cat << 'EOF' > /usr/local/bin/kiosk-login-cleanup.sh
 #!/bin/bash
@@ -291,11 +310,19 @@ NoDisplay=true
 EOF
 
 # 8.5 Hide default system sessions from the login menu chooser
-echo "Hiding Openbox and XFCE desktop session choices..."
-for session in "openbox.desktop" "xfce.desktop"; do
+echo "Hiding default desktop session choices..."
+SESSION_LIST=("openbox.desktop")
+if [ "$ADMIN_SESSION" = "xfce" ]; then
+    SESSION_LIST+=("xfce.desktop")
+elif [ "$ADMIN_SESSION" = "mate" ]; then
+    SESSION_LIST+=("mate.desktop")
+else
+    SESSION_LIST+=("cinnamon.desktop" "cinnamon2d.desktop")
+fi
+
+for session in "${SESSION_LIST[@]}"; do
     FILE_PATH="/usr/share/xsessions/$session"
     if [ -f "$FILE_PATH" ]; then
-        # Remove any existing NoDisplay entry to prevent duplicates, then append it fresh
         sed -i '/^NoDisplay=/d' "$FILE_PATH"
         echo "NoDisplay=true" >> "$FILE_PATH"
         echo "-> Successfully modified $session"
@@ -317,44 +344,52 @@ Icon=/usr/share/pixmaps/faces/user-generic.png
 SystemAccount=false
 EOF
 
-# Configure Admin user session target to force Xfce
+# Configure Admin user session target to match detected native OS environment
 echo "Configuring AccountsService session target for $ADMIN_USER..."
 cat << EOF > /var/lib/AccountsService/users/$ADMIN_USER
 [User]
-Session=xfce
-XSession=xfce
+Session=$ADMIN_SESSION
+XSession=$ADMIN_SESSION
 Icon=/usr/share/pixmaps/faces/user-generic.png
 SystemAccount=false
 EOF
 
-# --- CRITICAL XFCE RESET FIX ---
-echo "Forcibly resetting XFCE configurations to Linux Mint defaults for $ADMIN_USER..."
 
-# 1. Stop active XFCE daemons running under the admin user's name
-pkill -u "$ADMIN_USER" -x xfce4-panel
-pkill -u "$ADMIN_USER" -x xfconfd
-pkill -u "$ADMIN_USER" -x xfsettingsd
-
-# 2. Clean out the broken configs and cached XFCE session states
+# --- ENVIRONMENT TARGETED RESET FIX ---
 ADMIN_HOME="/home/$ADMIN_USER"
-rm -rf "$ADMIN_HOME/.config/xfce4"
-rm -rf "$ADMIN_HOME/.cache/sessions"
 
-# 3. Create a clean structure and inject Mint's true design defaults
-mkdir -p "$ADMIN_HOME/.config"
-if [ -d "/usr/share/mint-artwork/xfce/xfce4" ]; then
-    cp -r /usr/share/mint-artwork/xfce/xfce4 "$ADMIN_HOME/.config/"
-    echo "-> Successfully restored Linux Mint XFCE system templates"
-else
-    # Fallback to general system configurations if artwork is missing
-    mkdir -p "$ADMIN_HOME/.config/xfce4/xfconf"
-    cp -r /etc/xdg/xfce4/xfconf/xfce-perchannel-xml "$ADMIN_HOME/.config/xfce4/xfconf/"
-    echo "-> Fallback: copied standard system etc/xdg profiles"
+if [ "$ADMIN_SESSION" = "xfce" ]; then
+    echo "Forcibly resetting XFCE configurations to Linux Mint defaults for $ADMIN_USER..."
+    # 1. Stop active XFCE daemons running under the admin user's name
+    pkill -u "$ADMIN_USER" -x xfce4-panel
+    pkill -u "$ADMIN_USER" -x xfconfd
+    pkill -u "$ADMIN_USER" -x xfsettingsd
+
+    # 2. Clean out old configs
+    rm -rf "$ADMIN_HOME/.config/xfce4"
+    rm -rf "$ADMIN_HOME/.cache/sessions"
+
+    # 3. Inject Mint design defaults
+    mkdir -p "$ADMIN_HOME/.config"
+    if [ -d "/usr/share/mint-artwork/xfce/xfce4" ]; then
+        cp -r /usr/share/mint-artwork/xfce/xfce4 "$ADMIN_HOME/.config/"
+        echo "-> Successfully restored Linux Mint XFCE system templates"
+    else
+        mkdir -p "$ADMIN_HOME/.config/xfce4/xfconf"
+        cp -r /etc/xdg/xfce4/xfconf/xfce-perchannel-xml "$ADMIN_HOME/.config/xfce4/xfconf/"
+        echo "-> Fallback: copied standard system etc/xdg profiles"
+    fi
+
+elif [ "$ADMIN_SESSION" = "cinnamon" ] || [ "$ADMIN_SESSION" = "mate" ]; then
+    echo "-> Native Mint environment ($ADMIN_SESSION) detected. Skipping desktop state resets."
 fi
 
-# 4. Correctly lock permissions to the Admin User
-chown -R "$ADMIN_USER:$ADMIN_USER" "$ADMIN_HOME/.config"
-# -------------------------------
+# Correctly lock configuration ownership back to Admin User
+if [ -d "$ADMIN_HOME/.config" ]; then
+    chown -R "$ADMIN_USER:$ADMIN_USER" "$ADMIN_HOME/.config"
+fi
+# --------------------------------------
+
 
 # 10. Configure LightDM for automatic login
 echo "Configuring LightDM auto-login..."
@@ -378,7 +413,7 @@ chown $KIOSK_USER:$KIOSK_USER /home/$KIOSK_USER/.dmrc
 chmod 644 /home/$KIOSK_USER/.dmrc
 
 # Admin .dmrc
-echo -e "[Desktop]\nSession=xfce" > /home/$ADMIN_USER/.dmrc
+echo -e "[Desktop]\nSession=$ADMIN_SESSION" > /home/$ADMIN_USER/.dmrc
 chown $ADMIN_USER:$ADMIN_USER /home/$ADMIN_USER/.dmrc
 chmod 644 /home/$ADMIN_USER/.dmrc
 

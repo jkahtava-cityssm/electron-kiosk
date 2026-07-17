@@ -12,7 +12,7 @@ Follow these quick steps to deploy the application on your target machine.
 
 Create a copy of `setup-kiosk.sh` or edit it directly to point to your target website. Change the `KIOSK_URL` configuration property near the top of the script:
 
-bash
+```bash
 
 # ================= CONFIGURATION =================
 
@@ -20,7 +20,7 @@ KIOSK_USER="kiosk"
 KIOSK_URL="[https://your-target-url.com](https://your-target-url.com)"
 
 # =================================================
-
+```
 ### 2. Run the Installer
 
 Make the setup script executable and run it with root privileges.
@@ -28,6 +28,7 @@ Make the setup script executable and run it with root privileges.
 ```bash
 sudo chmod +x setup-kiosk.sh
 sudo ./setup-kiosk.sh
+```
 
 ### 3. Reboot
 The installer will automatically countdown and reboot the machine. Upon restarting, the system will log directly into the secure kiosk environment.

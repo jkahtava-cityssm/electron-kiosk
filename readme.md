@@ -12,13 +12,17 @@ Follow these quick steps to deploy the application on your target machine.
 
 Create a copy of `setup-kiosk.sh` or edit it directly to point to your target website. Change the `KIOSK_URL` configuration property near the top of the script:
 
-````bash
+bash
+
 # ================= CONFIGURATION =================
+
 KIOSK_USER="kiosk"
 KIOSK_URL="[https://your-target-url.com](https://your-target-url.com)"
+
 # =================================================
 
 ### 2. Run the Installer
+
 Make the setup script executable and run it with root privileges.
 
 ```bash
@@ -66,4 +70,5 @@ Because the application runs in a highly restricted full-screen layout, specific
 * **`main.js`**: Core Electron framework routing, privacy filter hooks, crash mitigation engines, and child process handlers.
 * **`preload.js`**: Injection script handling high-contrast accessible SVG UI, touchscreen tap tracking, and navigation states.
 * **`setup-kiosk.sh`**: Monolithic automated systems engineer mapping Openbox configurations, window rules (`wmctrl`/`zenity`), and LightDM profile setups.
-````
+
+```

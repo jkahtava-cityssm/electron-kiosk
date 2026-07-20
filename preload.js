@@ -1,7 +1,5 @@
-// preload.js
 const { contextBridge, ipcRenderer } = require("electron");
 
-// Clean, inline SVG strings
 const BACK_ICON = `
   <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
     <line x1="19" y1="12" x2="5" y2="12"></line>
@@ -16,20 +14,26 @@ const HOME_ICON = `
   </svg>
 `;
 
-window.addEventListener("DOMContentLoaded", () => {
+let navContainer = null;
+let backBtn = null;
+
+function injectKioskNavigation() {
+  // Prevent duplicate injections
+  if (document.getElementById("kiosk-nav-container")) return;
+
   // 1. Create a compact container
-  const navContainer = document.createElement("nav");
+  navContainer = document.createElement("nav");
   navContainer.id = "kiosk-nav-container";
   navContainer.setAttribute("aria-label", "Kiosk Navigation");
 
   Object.assign(navContainer.style, {
     position: "fixed",
     bottom: "24px",
-    left: "24px", // FIXED: Shifted from "right" to "left"
+    left: "24px",
     zIndex: "99999999",
     display: "flex",
     gap: "6px",
-    backgroundColor: "rgba(15, 15, 15, 0.9)", // Dark, sleek high-contrast base
+    backgroundColor: "rgba(15, 15, 15, 0.9)",
     padding: "6px",
     borderRadius: "40px",
     boxShadow: "0 4px 20px rgba(0, 0, 0, 0.4)",
@@ -46,33 +50,50 @@ window.addEventListener("DOMContentLoaded", () => {
   homeBtn.onclick = () => ipcRenderer.send("kiosk-home");
 
   // 3. Create the Back Icon Button
-  const backBtn = document.createElement("button");
+  backBtn = document.createElement("button");
   backBtn.innerHTML = BACK_ICON;
   backBtn.setAttribute("aria-label", "Go back to the previous page");
   styleIconButton(backBtn);
   backBtn.onclick = () => ipcRenderer.send("kiosk-back");
 
-  // Appending Home first, then Back (making Home the leftmost anchor)
+  // Initially hidden until main process broadcast sets state
+  backBtn.style.display = "none";
+
   navContainer.appendChild(homeBtn);
   navContainer.appendChild(backBtn);
   document.body.appendChild(navContainer);
+}
 
-  // 4. Polling helper to hide the back button when we are on the landing page
-  setInterval(async () => {
-    const canGoBack = await ipcRenderer.invoke("kiosk-can-go-back");
-    if (canGoBack) {
-      backBtn.style.display = "flex";
-      backBtn.removeAttribute("disabled");
-      backBtn.setAttribute("aria-hidden", "false");
-    } else {
-      backBtn.style.display = "none";
-      backBtn.setAttribute("disabled", "true");
-      backBtn.setAttribute("aria-hidden", "true");
+window.addEventListener("DOMContentLoaded", () => {
+  injectKioskNavigation();
+
+  // SPA Guard: Monitor the DOM. If an SPA wipes document.body, re-inject immediately.
+  const observer = new MutationObserver(() => {
+    if (!document.getElementById("kiosk-nav-container") && document.body) {
+      injectKioskNavigation();
     }
-  }, 500);
+  });
+
+  observer.observe(document.documentElement, {
+    childList: true,
+    subtree: true,
+  });
 });
 
-// Helper function to style the icon buttons
+// Event listener optimized to update styling instantly on main process notice
+ipcRenderer.on("update-navigation-state", (event, canGoBack) => {
+  if (!backBtn) return;
+  if (canGoBack) {
+    backBtn.style.display = "flex";
+    backBtn.removeAttribute("disabled");
+    backBtn.setAttribute("aria-hidden", "false");
+  } else {
+    backBtn.style.display = "none";
+    backBtn.setAttribute("disabled", "true");
+    backBtn.setAttribute("aria-hidden", "true");
+  }
+});
+
 function styleIconButton(btn) {
   Object.assign(btn.style, {
     display: "flex",
@@ -83,14 +104,13 @@ function styleIconButton(btn) {
     borderRadius: "50%",
     color: "#ffffff",
     cursor: "pointer",
-    width: "40px", // Highly compact, but keeps a perfect 40x40px active tap target
+    width: "40px",
     height: "40px",
     padding: "0",
     outline: "none",
     transition: "background-color 0.15s, border-color 0.15s, transform 0.1s",
   });
 
-  // Accessibility & interaction states
   btn.addEventListener("focus", () => {
     btn.style.borderColor = "#ffffff";
     btn.style.backgroundColor = "rgba(255, 255, 255, 0.15)";
@@ -111,7 +131,6 @@ function styleIconButton(btn) {
     }
   });
 
-  // Scale down slightly on press to give tactical feedback
   const pressStart = () => {
     btn.style.transform = "scale(0.9)";
   };

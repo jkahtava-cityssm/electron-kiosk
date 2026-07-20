@@ -109,7 +109,7 @@ function applyKioskPolicies(win, isMainWindow = false) {
   // Helper to push history availability down to the renderer without polling
   const pushNavigationState = () => {
     const history = win.webContents.navigationHistory;
-    const canGoBack = history ? history.canGoBack() : false;
+    const canGoBack = !isMainWindow || (history ? history.canGoBack() : false);
 
     if (!win.isDestroyed()) {
       win.webContents.send("update-navigation-state", canGoBack);
@@ -137,6 +137,8 @@ function applyKioskPolicies(win, isMainWindow = false) {
   // 3. Track History State changes to tell UI whether back button should render
   win.webContents.on("did-navigate", pushNavigationState);
   win.webContents.on("did-navigate-in-page", pushNavigationState); // Handles hash/SPA route changes
+
+  win.webContents.on("did-update-navigation-history", pushNavigationState);
 
   // 4. Handle Window Freezes
   win.webContents.on("unresponsive", () => {

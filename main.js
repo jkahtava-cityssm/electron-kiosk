@@ -109,7 +109,7 @@ function applyKioskPolicies(win, isMainWindow = false) {
   // Helper to push history availability down to the renderer without polling
   const pushNavigationState = () => {
     const history = win.webContents.navigationHistory;
-    const canGoBack = !isMainWindow || (history ? history.canGoBack() : false);
+    const canGoBack = history ? history.canGoBack() : false;
 
     if (!win.isDestroyed()) {
       win.webContents.send("update-navigation-state", canGoBack);

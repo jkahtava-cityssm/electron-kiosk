@@ -139,6 +139,7 @@ function applyKioskPolicies(win, isMainWindow = false) {
   win.webContents.on("did-navigate-in-page", pushNavigationState); // Handles hash/SPA route changes
 
   win.webContents.on("did-update-navigation-history", pushNavigationState);
+  win.webContents.on("dom-ready", pushNavigationState);
 
   // 4. Handle Window Freezes
   win.webContents.on("unresponsive", () => {

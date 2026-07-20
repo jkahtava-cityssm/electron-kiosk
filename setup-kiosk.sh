@@ -9,6 +9,7 @@ fi
 # ================= CONFIGURATION =================
 KIOSK_USER="kiosk"
 KIOSK_URL="https://ssmpl.bibliocommons.com"
+KIOSK_NAV_POSITION="bottom-left" # Choices: top-left, top-right, bottom-left, bottom-right
 # =================================================
 
 # 0. Detect Linux Mint Desktop Environment Flavor
@@ -198,7 +199,8 @@ APP_CONFIG_DIR="/home/$KIOSK_USER/.config/electron-kiosk"
 mkdir -p "$APP_CONFIG_DIR"
 cat << EOF > "$APP_CONFIG_DIR/config.json"
 {
-  "url": "$KIOSK_URL"
+  "url": "$KIOSK_URL",
+  "nav_position": "$KIOSK_NAV_POSITION"
 }
 EOF
 

@@ -239,6 +239,31 @@ const createSetupWindow = () => {
 app.whenReady().then(() => {
   Menu.setApplicationMenu(Menu.buildFromTemplate([]));
 
+  ipcMain.handle("request-navigation-state", (event) => {
+    const webContents = event.sender;
+    const win = BrowserWindow.fromWebContents(webContents);
+    if (!win || win.isDestroyed()) return { canGoBack: false, position: "bottom-left" };
+
+    const isMainWindow = win === mainKioskWindow;
+    const history = webContents.navigationHistory;
+
+    // Read config to find out what position was chosen
+    let position = "bottom-left";
+    try {
+      if (fs.existsSync(CONFIG_PATH)) {
+        const data = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf-8"));
+        position = data.position || "bottom-left";
+      }
+    } catch (e) {
+      position = "bottom-left";
+    }
+
+    return {
+      canGoBack: !isMainWindow || (history ? history.canGoBack() : false),
+      position: position,
+    };
+  });
+
   ipcMain.on("save-url", (event, url) => {
     if (saveConfiguredUrl(url)) {
       app.relaunch();

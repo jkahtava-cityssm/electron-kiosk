@@ -17,19 +17,62 @@ const HOME_ICON = `
 let navContainer = null;
 let backBtn = null;
 
+function applyDynamicPosition(container, positionValue) {
+  container.style.top = "auto";
+  container.style.bottom = "auto";
+  container.style.left = "auto";
+  container.style.right = "auto";
+
+  switch (positionValue) {
+    case "top-left":
+      container.style.top = "24px";
+      container.style.left = "24px";
+      break;
+    case "top-right":
+      container.style.top = "24px";
+      container.style.right = "24px";
+      break;
+    case "bottom-right":
+      container.style.bottom = "24px";
+      container.style.right = "24px";
+      break;
+    case "bottom-left":
+    default:
+      container.style.bottom = "24px";
+      container.style.left = "24px";
+      break;
+  }
+}
+
+async function refreshBackButton() {
+  if (!navContainer || !backBtn) return;
+
+  // Pull safe state from main process invocation channel
+  const state = await ipcRenderer.invoke("request-navigation-state");
+
+  // Keep location configuration synced
+  applyDynamicPosition(navContainer, state.position);
+
+  if (state.canGoBack) {
+    backBtn.style.display = "flex";
+    backBtn.removeAttribute("disabled");
+    backBtn.setAttribute("aria-hidden", "false");
+  } else {
+    backBtn.style.display = "none";
+    backBtn.setAttribute("disabled", "true");
+    backBtn.setAttribute("aria-hidden", "true");
+  }
+}
+
 function injectKioskNavigation() {
-  // Prevent duplicate injections
   if (document.getElementById("kiosk-nav-container")) return;
 
-  // 1. Create a compact container
   navContainer = document.createElement("nav");
   navContainer.id = "kiosk-nav-container";
   navContainer.setAttribute("aria-label", "Kiosk Navigation");
 
   Object.assign(navContainer.style, {
     position: "fixed",
-    bottom: "24px",
-    left: "24px",
     zIndex: "99999999",
     display: "flex",
     gap: "6px",
@@ -42,35 +85,33 @@ function injectKioskNavigation() {
     userSelect: "none",
   });
 
-  // 2. Create the Home Icon Button
   const homeBtn = document.createElement("button");
   homeBtn.innerHTML = HOME_ICON;
-  homeBtn.setAttribute("aria-label", "Return to the main kiosk home screen");
   styleIconButton(homeBtn);
   homeBtn.onclick = () => ipcRenderer.send("kiosk-home");
 
-  // 3. Create the Back Icon Button
   backBtn = document.createElement("button");
   backBtn.innerHTML = BACK_ICON;
-  backBtn.setAttribute("aria-label", "Go back to the previous page");
   styleIconButton(backBtn);
   backBtn.onclick = () => ipcRenderer.send("kiosk-back");
-
-  // Initially hidden until main process broadcast sets state
   backBtn.style.display = "none";
 
   navContainer.appendChild(homeBtn);
   navContainer.appendChild(backBtn);
   document.body.appendChild(navContainer);
+
+  refreshBackButton();
 }
 
 window.addEventListener("DOMContentLoaded", () => {
   injectKioskNavigation();
 
-  // SPA Guard: Monitor the DOM. If an SPA wipes document.body, re-inject immediately.
   const observer = new MutationObserver(() => {
     if (!document.getElementById("kiosk-nav-container") && document.body) {
       injectKioskNavigation();
+    } else {
+      // Re-verify back state / orientation layouts whenever DOM structure shifts
+      refreshBackButton();
     }
   });
 
@@ -80,18 +121,9 @@ window.addEventListener("DOMContentLoaded", () => {
   });
 });
 
-// Event listener optimized to update styling instantly on main process notice
-ipcRenderer.on("update-navigation-state", (event, canGoBack) => {
-  if (!backBtn) return;
-  if (canGoBack) {
-    backBtn.style.display = "flex";
-    backBtn.removeAttribute("disabled");
-    backBtn.setAttribute("aria-hidden", "false");
-  } else {
-    backBtn.style.display = "none";
-    backBtn.setAttribute("disabled", "true");
-    backBtn.setAttribute("aria-hidden", "true");
-  }
+// Re-route legacy push state events through unified execution channel
+ipcRenderer.on("update-navigation-state", () => {
+  refreshBackButton();
 });
 
 function styleIconButton(btn) {

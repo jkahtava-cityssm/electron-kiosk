@@ -276,22 +276,23 @@ app.whenReady().then(() => {
     const webContents = event.sender;
     const win = BrowserWindow.fromWebContents(webContents);
     const savedUrl = getConfig().url;
-    const history = webContents.navigationHistory;
 
     if (win && savedUrl) {
       if (win !== mainKioskWindow) {
         win.close();
       } else {
         win.loadURL(savedUrl);
-        if (history) history.clear();
 
         win.webContents.send("update-navigation-state", false);
-
         webContents.session.clearStorageData({
           storages: ["cookies", "localstorage", "cache"],
         });
 
-        webContents.once("dom-ready", () => {
+        webContents.once("did-finish-load", () => {
+          const history = webContents.navigationHistory;
+          if (history) {
+            history.clear();
+          }
           pushNavigationState(win);
         });
       }

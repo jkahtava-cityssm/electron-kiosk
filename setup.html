@@ -1,0 +1,75 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Kiosk Setup</title>
+    <style>
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        padding: 20px;
+        background: #f3f4f6;
+        color: #333;
+      }
+      h3 {
+        margin-top: 0;
+      }
+      label {
+        font-weight: bold;
+        font-size: 14px;
+        display: block;
+        margin-top: 10px;
+      }
+      input,
+      select {
+        width: 100%;
+        padding: 10px;
+        margin: 5px 0 15px 0;
+        box-sizing: border-box;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+      }
+      button {
+        background: #0076ff;
+        color: white;
+        border: none;
+        padding: 10px 20px;
+        border-radius: 4px;
+        cursor: pointer;
+        float: right;
+      }
+      button:hover {
+        background: #0060d0;
+      }
+    </style>
+  </head>
+  <body>
+    <h3>Configure Kiosk Display</h3>
+    <p>Set up the landing target and interface constraints:</p>
+
+    <label for="urlInput">Default URL</label>
+    <input type="url" id="urlInput" placeholder="https://example.com" value="https://" />
+
+    <label for="posInput">Navigation Bar Position</label>
+    <select id="posInput">
+      <option value="bottom-left">Bottom Left</option>
+      <option value="bottom-right">Bottom Right</option>
+      <option value="top-left">Top Left</option>
+      <option value="top-right">Top Right</option>
+    </select>
+
+    <button onclick="save()">Save & Launch</button>
+
+    <script>
+      const { ipcRenderer } = require("electron");
+      function save() {
+        const url = document.getElementById("urlInput").value;
+        const pos = document.getElementById("posInput").value;
+        if (url.startsWith("http://") || url.startsWith("https://")) {
+          ipcRenderer.send("save-config", { url, nav_position: pos });
+        } else {
+          alert("Please enter a valid URL starting with http:// or https://");
+        }
+      }
+    </script>
+  </body>
+</html>

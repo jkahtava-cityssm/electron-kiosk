@@ -75,21 +75,25 @@ function sanitizeAndCleanUrl(rawUrl, contextName = "Navigation") {
   }
 }
 
-function getConfiguredUrl() {
+// --- CONFIGURATION MANAGEMENT ---
+function getConfig() {
   try {
     if (fs.existsSync(CONFIG_PATH)) {
-      const data = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf-8"));
-      return data.url || null;
+      return JSON.parse(fs.readFileSync(CONFIG_PATH, "utf-8")) || {};
     }
   } catch (e) {
-    logToFile("Failed to read config", e);
+    logToFile("Failed to read config file: " + e.message);
   }
-  return null;
+  return {};
 }
 
-function saveConfiguredUrl(url) {
+function saveConfiguredData(url, navPosition) {
   try {
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify({ url: url.trim() }), "utf-8");
+    const configData = {
+      url: url.trim(),
+      nav_position: navPosition || "bottom-left",
+    };
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(configData, null, 2), "utf-8");
     return true;
   } catch (e) {
     dialog.showErrorBox("Error", "Failed to save configuration.");
@@ -106,7 +110,6 @@ function applyKioskPolicies(win, isMainWindow = false) {
 
   const context = isMainWindow ? "Main" : "Child";
 
-  // Helper to push history availability down to the renderer without polling
   const pushNavigationState = () => {
     const history = win.webContents.navigationHistory;
     const canGoBack = !isMainWindow || (history ? history.canGoBack() : false);
@@ -116,7 +119,6 @@ function applyKioskPolicies(win, isMainWindow = false) {
     }
   };
 
-  // 1. Intercept Standard Link Clicks
   win.webContents.on("will-navigate", (event, navigationUrl) => {
     const check = sanitizeAndCleanUrl(navigationUrl, `${context}-WillNavigate`);
     if (check.success && check.altered) {
@@ -125,7 +127,6 @@ function applyKioskPolicies(win, isMainWindow = false) {
     }
   });
 
-  // 2. Intercept Server-Side HTTP Redirects
   win.webContents.on("will-redirect", (event, navigationUrl) => {
     const check = sanitizeAndCleanUrl(navigationUrl, `${context}-Redirect`);
     if (check.success && check.altered) {
@@ -134,20 +135,16 @@ function applyKioskPolicies(win, isMainWindow = false) {
     }
   });
 
-  // 3. Track History State changes to tell UI whether back button should render
   win.webContents.on("did-navigate", pushNavigationState);
-  win.webContents.on("did-navigate-in-page", pushNavigationState); // Handles hash/SPA route changes
-
+  win.webContents.on("did-navigate-in-page", pushNavigationState);
   win.webContents.on("did-update-navigation-history", pushNavigationState);
   win.webContents.on("dom-ready", pushNavigationState);
 
-  // 4. Handle Window Freezes
   win.webContents.on("unresponsive", () => {
     logToFile(`${context} window unresponsive! Attempting reload...`);
     win.reload();
   });
 
-  // 5. Handle Render Process Crashes
   win.webContents.on("render-process-gone", (event, details) => {
     logToFile(`${context} renderer process gone. Reason: ${details.reason}, Exit Code: ${details.exitCode}`);
     if (details.reason !== "clean-exit") {
@@ -156,7 +153,6 @@ function applyKioskPolicies(win, isMainWindow = false) {
     }
   });
 
-  // 6. Handle Recursive Window Spawning (window.open inside child windows too)
   win.webContents.setWindowOpenHandler(({ url }) => {
     logToFile(`[${context}-WindowOpenHandler] Intercepted request for popup: ${url}`);
     const check = sanitizeAndCleanUrl(url, `${context}-WindowOpenHandler`);
@@ -201,7 +197,6 @@ const createWindow = (url) => {
 
   applyKioskPolicies(mainKioskWindow, true);
 
-  // Connection Fail-Safe (Specific to Main landing window initialization)
   mainKioskWindow.webContents.on("did-fail-load", (event, code, desc) => {
     logToFile(`Failed to load: ${desc}. Retrying in 5 seconds...`);
     if (kioskReloadTimeout) clearTimeout(kioskReloadTimeout);
@@ -220,22 +215,22 @@ const createWindow = (url) => {
 const createSetupWindow = () => {
   const setupWin = new BrowserWindow({
     width: 500,
-    height: 300,
+    height: 380,
     resizable: false,
     minimizable: false,
     maximizable: false,
     modal: true,
     title: "Kiosk Setup",
     webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-      preload: path.join(__dirname, "setup-preload.js"),
+      nodeIntegration: true,
+      contextIsolation: false,
     },
   });
+
   setupWin.loadFile(path.join(__dirname, "setup.html"));
 };
 
-// IPC Global Event Navigation Management
+// --- IPC EVENT MANAGEMENT ---
 app.whenReady().then(() => {
   Menu.setApplicationMenu(Menu.buildFromTemplate([]));
 
@@ -247,25 +242,17 @@ app.whenReady().then(() => {
     const isMainWindow = win === mainKioskWindow;
     const history = webContents.navigationHistory;
 
-    // Read config to find out what position was chosen
-    let position = "bottom-left";
-    try {
-      if (fs.existsSync(CONFIG_PATH)) {
-        const data = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf-8"));
-        position = data.position || "bottom-left";
-      }
-    } catch (e) {
-      position = "bottom-left";
-    }
+    // Cleanly fetch with our new helper
+    const config = getConfig();
 
     return {
       canGoBack: !isMainWindow || (history ? history.canGoBack() : false),
-      position: position,
+      position: config.nav_position || "bottom-left",
     };
   });
 
-  ipcMain.on("save-url", (event, url) => {
-    if (saveConfiguredUrl(url)) {
+  ipcMain.on("save-config", (event, config) => {
+    if (saveConfiguredData(config.url, config.nav_position)) {
       app.relaunch();
       app.exit();
     }
@@ -288,7 +275,7 @@ app.whenReady().then(() => {
   ipcMain.on("kiosk-home", (event) => {
     const webContents = event.sender;
     const win = BrowserWindow.fromWebContents(webContents);
-    const savedUrl = getConfiguredUrl();
+    const savedUrl = getConfig().url; // Cleanly reuse here
     const history = webContents.navigationHistory;
 
     if (win && savedUrl) {
@@ -304,7 +291,7 @@ app.whenReady().then(() => {
     }
   });
 
-  const savedUrl = getConfiguredUrl();
+  const savedUrl = getConfig().url; // Cleanly reuse here
   if (savedUrl) {
     createWindow(savedUrl);
   } else {

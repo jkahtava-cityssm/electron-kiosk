@@ -200,7 +200,7 @@ mkdir -p "$APP_CONFIG_DIR"
 cat << EOF > "$APP_CONFIG_DIR/config.json"
 {
   "url": "$KIOSK_URL",
-  "nav_position": "$KIOSK_NAV_POSITION"
+  "position": "$KIOSK_NAV_POSITION"
 }
 EOF
 

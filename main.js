@@ -109,15 +109,7 @@ function applyKioskPolicies(win, isMainWindow = false) {
   win.webContents.setUserAgent(cleanChromeUA);
 
   const context = isMainWindow ? "Main" : "Child";
-
-  const pushNavigationState = () => {
-    const history = win.webContents.navigationHistory;
-    const canGoBack = !isMainWindow || (history ? history.canGoBack() : false);
-
-    if (!win.isDestroyed()) {
-      win.webContents.send("update-navigation-state", canGoBack);
-    }
-  };
+  const triggerPush = () => pushNavigationState(win);
 
   win.webContents.on("will-navigate", (event, navigationUrl) => {
     const check = sanitizeAndCleanUrl(navigationUrl, `${context}-WillNavigate`);
@@ -135,10 +127,10 @@ function applyKioskPolicies(win, isMainWindow = false) {
     }
   });
 
-  win.webContents.on("did-navigate", pushNavigationState);
-  win.webContents.on("did-navigate-in-page", pushNavigationState);
-  win.webContents.on("did-update-navigation-history", pushNavigationState);
-  win.webContents.on("dom-ready", pushNavigationState);
+  win.webContents.on("did-navigate", triggerPush);
+  win.webContents.on("did-navigate-in-page", triggerPush);
+  win.webContents.on("did-update-navigation-history", triggerPush);
+  win.webContents.on("dom-ready", triggerPush);
 
   win.webContents.on("unresponsive", () => {
     logToFile(`${context} window unresponsive! Attempting reload...`);
@@ -230,6 +222,16 @@ const createSetupWindow = () => {
   setupWin.loadFile(path.join(__dirname, "setup.html"));
 };
 
+function pushNavigationState(win) {
+  if (!win || win.isDestroyed()) return;
+
+  const isMainWindow = win === mainKioskWindow;
+  const history = win.webContents.navigationHistory;
+  const canGoBack = !isMainWindow || (history ? history.canGoBack() : false);
+
+  win.webContents.send("update-navigation-state", canGoBack);
+}
+
 // --- IPC EVENT MANAGEMENT ---
 app.whenReady().then(() => {
   Menu.setApplicationMenu(Menu.buildFromTemplate([]));
@@ -241,8 +243,6 @@ app.whenReady().then(() => {
 
     const isMainWindow = win === mainKioskWindow;
     const history = webContents.navigationHistory;
-
-    // Cleanly fetch with our new helper
     const config = getConfig();
 
     return {
@@ -275,7 +275,7 @@ app.whenReady().then(() => {
   ipcMain.on("kiosk-home", (event) => {
     const webContents = event.sender;
     const win = BrowserWindow.fromWebContents(webContents);
-    const savedUrl = getConfig().url; // Cleanly reuse here
+    const savedUrl = getConfig().url;
     const history = webContents.navigationHistory;
 
     if (win && savedUrl) {
@@ -284,14 +284,21 @@ app.whenReady().then(() => {
       } else {
         win.loadURL(savedUrl);
         if (history) history.clear();
+
+        win.webContents.send("update-navigation-state", false);
+
         webContents.session.clearStorageData({
           storages: ["cookies", "localstorage", "cache"],
+        });
+
+        webContents.once("dom-ready", () => {
+          pushNavigationState(win);
         });
       }
     }
   });
 
-  const savedUrl = getConfig().url; // Cleanly reuse here
+  const savedUrl = getConfig().url;
   if (savedUrl) {
     createWindow(savedUrl);
   } else {

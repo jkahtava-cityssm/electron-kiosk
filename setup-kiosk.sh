@@ -10,6 +10,7 @@ fi
 KIOSK_USER="kiosk"
 KIOSK_URL="https://ssmpl.bibliocommons.com"
 KIOSK_NAV_POSITION="bottom-left" # Choices: top-left, top-right, bottom-left, bottom-right
+KIOSK_IDLE_MINUTES=10            # Inactivity timeout in minutes (0 to disable)
 # =================================================
 
 # 0. Detect Linux Mint Desktop Environment Flavor
@@ -47,7 +48,7 @@ echo "=== Starting Linux Mint Openbox Kiosk Setup ==="
 
 # 1. Install Openbox, Zenity, wmctrl, and temporary setup tools
 echo "Installing Openbox, Zenity, wmctrl, and setup tools..."
-apt update && apt install -y openbox zenity wmctrl curl jq
+apt update && apt install -y openbox zenity wmctrl xprintidle xdotool curl jq
 
 # Check if electron-kiosk is already installed and remove it
 if dpkg -s electron-kiosk &>/dev/null; then
@@ -91,11 +92,9 @@ else
 fi
 
 echo "Configuring passwordless login for '$KIOSK_USER'..."
-# Create the 'nopasswdlogin' group if it doesn't already exist
 if ! getent group nopasswdlogin &>/dev/null; then
     groupadd -r nopasswdlogin
 fi
-# Add the kiosk user to the passwordless login group
 usermod -aG nopasswdlogin "$KIOSK_USER"
 
 # 4. Create Openbox directories and add the custom Keybinds
@@ -103,9 +102,6 @@ echo "Configuring Openbox keybindings for the kiosk user..."
 OB_CONFIG_DIR="/home/$KIOSK_USER/.config/openbox"
 mkdir -p "$OB_CONFIG_DIR"
 
-# Generate an Openbox configuration mapping:
-# - C-A-S-e (Ctrl+Alt+Shift+E) to standard logout confirmation prompt
-# - C-A-S-r (Ctrl+Alt+Shift+R) to restart electron-kiosk
 cat << EOF > "$OB_CONFIG_DIR/rc.xml"
 <?xml version="1.0" encoding="UTF-8"?>
 <openbox_config xmlns="http://openbox.org/3.4/rc" xmlns:xi="http://www.w3.org/2001/XInclude">
@@ -134,12 +130,11 @@ cat << EOF > "$OB_CONFIG_DIR/rc.xml"
 </openbox_config>
 EOF
 
-# 5. Create the Interactive Logout Prompt Script (with multi-launch avoidance & focus forcing)
+# 5. Create the Interactive Logout Prompt Script
 echo "Creating the admin logout prompt script..."
 cat << 'EOF' > /usr/local/bin/kiosk-logout-prompt.sh
 #!/bin/bash
 
-# Define a self-cleaning lock directory path using the user's systemd runtime directory
 USER_UID=$(id -u)
 RUNTIME_DIR="/run/user/$USER_UID"
 
@@ -149,23 +144,16 @@ else
     LOCKDIR="/tmp/kiosk_logout_prompt_$USER_UID.lock"
 fi
 
-# Prevent multiple dialogs from spawning if the keys are held down
 if ! mkdir "$LOCKDIR" 2>/dev/null; then
-    # Another instance of this dialog is already open. 
-    # Instead of exiting silently, let's aggressively bring the existing Zenity dialog to the front!
     wmctrl -R "Admin Verification" 2>/dev/null
     exit 0
 fi
 
-# Ensure the lock directory is deleted on standard cancel/close events
 trap 'rmdir "$LOCKDIR" 2>/dev/null' EXIT
 
-# Background helper: Wait briefly for the Zenity window to spawn, then force it to focus & layer on top
 (
-    # Poll up to 1.5 seconds for the window to appear
     for i in {1..15}; do
         if wmctrl -l | grep -q "Admin Verification"; then
-            # Found it! Bring to current desktop, raise window, set 'always on top', and focus keyboard
             wmctrl -R "Admin Verification"
             wmctrl -a "Admin Verification"
             wmctrl -r "Admin Verification" -b add,above
@@ -175,19 +163,21 @@ trap 'rmdir "$LOCKDIR" 2>/dev/null' EXIT
     done
 ) &
 
-# Use zenity to pop up a clean, modern question dialog box
 zenity --question \
        --title="Admin Verification" \
-       --text="Are you sure you want to end this session?" \
-       --ok-label="Log Out" \
+       --text="Are you sure you want to end this session and switch users?" \
+       --ok-label="Switch User" \
        --cancel-label="Cancel" \
        --width=350
 
 if [ $? -eq 0 ]; then
-    # Manually clean up right before triggering the kill switch, 
-    # though systemd will wipe the /run/user/UID directory anyway!
     rmdir "$LOCKDIR" 2>/dev/null
-    loginctl terminate-session self
+
+    # 1. Signal intentional admin exit
+    touch /tmp/admin_switch_flag
+
+    # 2. Kill kiosk session to drop back to greeter
+    pkill -KILL -u kiosk
 fi
 EOF
 
@@ -204,53 +194,71 @@ cat << EOF > "$APP_CONFIG_DIR/config.json"
 }
 EOF
 
-# Fix permissions across the home directory files
-chown -R $KIOSK_USER:$KIOSK_USER /home/$KIOSK_USER/.config
-
 # 7. Create the Kiosk execution script
 echo "Creating kiosk launch script..."
-cat << 'EOF' > /usr/local/bin/kiosk-session.sh
+cat << EOF > /usr/local/bin/kiosk-session.sh
 #!/bin/bash
 
-# Extra fail-safe cleanup: Clear user's session-lock when starting up
-uid=$(id -u)
-rm -rf "/run/user/$uid/kiosk_logout_prompt.lock"
-rm -rf "/tmp/kiosk_logout_prompt_$uid.lock"
+# Clear leftover locks
+uid=\$(id -u)
+rm -rf "/run/user/\$uid/kiosk_logout_prompt.lock"
+rm -rf "/tmp/kiosk_logout_prompt_\$uid.lock"
 
-# Force standard environment pathing and map to primary display
 export DISPLAY=:0
 export DBUS_SESSION_BUS_ADDRESS=autolaunch:
 
-# Disable screen saver, screen blanking, and power saving
+# Disable screen saver, screen blanking, and display sleep
 xset -dpms
 xset s off
 xset s noblank
 
-# Start Openbox window manager in the background using our custom configuration
-openbox --config-file /home/kiosk/.config/openbox/rc.xml &
+# Start Openbox
+openbox --config-file /home/$KIOSK_USER/.config/openbox/rc.xml &
 
-# Persistent loop to restart the app if a user somehow closes it
+# --- IN-SESSION IDLE RESET DAEMON ---
+IDLE_LIMIT_MINS=$KIOSK_IDLE_MINUTES
+
+if [ "\$IDLE_LIMIT_MINS" -gt 0 ]; then
+    IDLE_LIMIT_MS=\$(( IDLE_LIMIT_MINS * 60 * 1000 ))
+    (
+        export DISPLAY=:0
+        while true; do
+            sleep 3
+            
+            IS_ACTIVE=\$(loginctl show-session \$(loginctl | grep $KIOSK_USER | awk '{print \$1}') -p Active --value 2>/dev/null)
+            
+            if [ "\$IS_ACTIVE" = "yes" ]; then
+                CURRENT_IDLE=\$(xprintidle 2>/dev/null)
+                
+                if [[ "\$CURRENT_IDLE" =~ ^[0-9]+\$ ]] && [ "\$CURRENT_IDLE" -ge "\$IDLE_LIMIT_MS" ]; then
+                    echo "Idle threshold reached (\$IDLE_LIMIT_MINS mins). Resetting kiosk session..."
+                    pkill -KILL -u $KIOSK_USER
+                    break
+                fi
+            fi
+        done
+    ) &
+fi
+# ------------------------------------
+
+# App Launcher
 while true; do
+    sleep 1
     electron-kiosk
-    sleep 2
 done
 EOF
 
 chmod +x /usr/local/bin/kiosk-session.sh
 
-# 7.5 Create a LightDM session wrapper to force session assignment by username
+# 7.5 Session wrapper script
 echo "Creating the session-wrapper override script..."
 cat << 'EOF' > /usr/local/bin/kiosk-session-wrapper.sh
 #!/bin/bash
-# $1 is the path to the session executable passed by LightDM
-
 case "$USER" in
     kiosk)
-        # Force the kiosk script no matter what LightDM or .dmrc requested
         exec /usr/local/bin/kiosk-session.sh
         ;;
     *)
-        # Allow admin/other users to run their selected session normally
         exec "$@"
         ;;
 esac
@@ -258,36 +266,41 @@ EOF
 
 chmod +x /usr/local/bin/kiosk-session-wrapper.sh
 
-
-# 7.8 Create a LightDM Login Cleanup Script
-echo "Creating the LightDM session-setup cleaner hook..."
-cat << 'EOF' > /usr/local/bin/kiosk-login-cleanup.sh
+# 7.7 LightDM Restart Cleanup Hook
+echo "Creating the LightDM session-cleanup hook..."
+cat << 'EOF' > /usr/local/bin/kiosk-logout-restart.sh
 #!/bin/bash
-# This script is executed by LightDM as root immediately before a session starts.
+if [ "$USER" = "kiosk" ]; then
+    if [ -f /tmp/admin_switch_flag ]; then
+        rm -f /tmp/admin_switch_flag
+    else
+        systemctl restart lightdm
+    fi
+fi
+EOF
 
-# 1. Clean up temporary directory locks for all potential login users
+chmod +x /usr/local/bin/kiosk-logout-restart.sh
+
+# 7.8 LightDM Login Cleanup Script
+echo "Creating the LightDM session-setup cleaner hook..."
+cat << EOF > /usr/local/bin/kiosk-login-cleanup.sh
+#!/bin/bash
+
 rm -rf /tmp/kiosk_logout_prompt_*.lock
+rm -f /tmp/admin_switch_flag
 
-# 2. Clean up dynamic user runtime directory locks
 for user_dir in /run/user/*; do
-    if [ -d "$user_dir" ]; then
-        rm -rf "$user_dir/kiosk_logout_prompt.lock"
+    if [ -d "\$user_dir" ]; then
+        rm -rf "\$user_dir/kiosk_logout_prompt.lock"
     fi
 done
 
-# 3. IF the logging-in user is the kiosk, reset their profile to the master template
-if [ "$USER" = "kiosk" ]; then
+if [ "\$USER" = "$KIOSK_USER" ]; then
     if [ -d "/opt/kiosk_template" ]; then
         echo "Resetting kiosk user profile..."
-        
-        # Safely delete all files and hidden dotfiles inside /home/kiosk without deleting /home/kiosk itself
-        find /home/kiosk -mindepth 1 -delete
-        
-        # Copy the master template back in
-        cp -a /opt/kiosk_template/. /home/kiosk/
-        
-        # Force strict kiosk ownership
-        chown -R kiosk:kiosk /home/kiosk
+        find /home/$KIOSK_USER -mindepth 1 -delete 2>/dev/null
+        cp -a /opt/kiosk_template/. /home/$KIOSK_USER/
+        chown -R $KIOSK_USER:$KIOSK_USER /home/$KIOSK_USER
     fi
 fi
 
@@ -296,8 +309,7 @@ EOF
 
 chmod +x /usr/local/bin/kiosk-login-cleanup.sh
 
-
-# 8. Create the strict XSession desktop file with NoDisplay enabled
+# 8. Create XSession desktop file
 echo "Creating XSession desktop file..."
 cat << EOF > /usr/share/xsessions/kiosk.desktop
 [Desktop Entry]
@@ -311,7 +323,7 @@ DesktopNames=Openbox
 NoDisplay=true
 EOF
 
-# 8.5 Hide default system sessions from the login menu chooser
+# 8.5 Hide default system sessions
 echo "Hiding default desktop session choices..."
 SESSION_LIST=("openbox.desktop")
 if [ "$ADMIN_SESSION" = "xfce" ]; then
@@ -333,11 +345,10 @@ for session in "${SESSION_LIST[@]}"; do
     fi
 done
 
-# 9. Explicitly override AccountsService targets for both users
+# 9. Configure AccountsService
 echo "Configuring AccountsService session targets..."
 mkdir -p /var/lib/AccountsService/users
 
-# Configure Kiosk user session target
 cat << EOF > /var/lib/AccountsService/users/$KIOSK_USER
 [User]
 Session=kiosk
@@ -346,8 +357,6 @@ Icon=/usr/share/pixmaps/faces/user-generic.png
 SystemAccount=false
 EOF
 
-# Configure Admin user session target to match detected native OS environment
-echo "Configuring AccountsService session target for $ADMIN_USER..."
 cat << EOF > /var/lib/AccountsService/users/$ADMIN_USER
 [User]
 Session=$ADMIN_SESSION
@@ -356,77 +365,62 @@ Icon=/usr/share/pixmaps/faces/user-generic.png
 SystemAccount=false
 EOF
 
-
-# --- ENVIRONMENT TARGETED RESET FIX ---
 ADMIN_HOME="/home/$ADMIN_USER"
-
 if [ "$ADMIN_SESSION" = "xfce" ]; then
-    echo "Forcibly resetting XFCE configurations to Linux Mint defaults for $ADMIN_USER..."
-    # 1. Stop active XFCE daemons running under the admin user's name
-    pkill -u "$ADMIN_USER" -x xfce4-panel
-    pkill -u "$ADMIN_USER" -x xfconfd
-    pkill -u "$ADMIN_USER" -x xfsettingsd
+    echo "Resetting XFCE configurations to Linux Mint defaults for $ADMIN_USER..."
+    pkill -u "$ADMIN_USER" -x xfce4-panel 2>/dev/null
+    pkill -u "$ADMIN_USER" -x xfconfd 2>/dev/null
+    pkill -u "$ADMIN_USER" -x xfsettingsd 2>/dev/null
 
-    # 2. Clean out old configs
     rm -rf "$ADMIN_HOME/.config/xfce4"
     rm -rf "$ADMIN_HOME/.cache/sessions"
 
-    # 3. Inject Mint design defaults
     mkdir -p "$ADMIN_HOME/.config"
     if [ -d "/usr/share/mint-artwork/xfce/xfce4" ]; then
         cp -r /usr/share/mint-artwork/xfce/xfce4 "$ADMIN_HOME/.config/"
-        echo "-> Successfully restored Linux Mint XFCE system templates"
     else
         mkdir -p "$ADMIN_HOME/.config/xfce4/xfconf"
         cp -r /etc/xdg/xfce4/xfconf/xfce-perchannel-xml "$ADMIN_HOME/.config/xfce4/xfconf/"
-        echo "-> Fallback: copied standard system etc/xdg profiles"
     fi
-
-elif [ "$ADMIN_SESSION" = "cinnamon" ] || [ "$ADMIN_SESSION" = "mate" ]; then
-    echo "-> Native Mint environment ($ADMIN_SESSION) detected. Skipping desktop state resets."
 fi
 
-# Correctly lock configuration ownership back to Admin User
 if [ -d "$ADMIN_HOME/.config" ]; then
     chown -R "$ADMIN_USER:$ADMIN_USER" "$ADMIN_HOME/.config"
 fi
-# --------------------------------------
 
-
-# 10. Configure LightDM for automatic login
+# 10. Configure LightDM
 echo "Configuring LightDM auto-login..."
 mkdir -p /etc/lightdm/lightdm.conf.d
 cat << EOF > /etc/lightdm/lightdm.conf.d/70-kiosk.conf
 [Seat:*]
 autologin-user=$KIOSK_USER
 autologin-user-timeout=0
-user-session=kiosk
-autologin-session=kiosk
 session-wrapper=/usr/local/bin/kiosk-session-wrapper.sh
 session-setup-script=/usr/local/bin/kiosk-login-cleanup.sh
+session-cleanup-script=/usr/local/bin/kiosk-logout-restart.sh
+autologin-in-background=false
+pam-autologin-service=lightdm-autologin
 EOF
 
-# 10.5 Generate and lock user .dmrc files
+# 10.5 Seed user .dmrc files
 echo "Seeding default .dmrc session files..."
-
-# Kiosk .dmrc
 echo -e "[Desktop]\nSession=kiosk" > /home/$KIOSK_USER/.dmrc
-chown $KIOSK_USER:$KIOSK_USER /home/$KIOSK_USER/.dmrc
 chmod 644 /home/$KIOSK_USER/.dmrc
 
-# Admin .dmrc
 echo -e "[Desktop]\nSession=$ADMIN_SESSION" > /home/$ADMIN_USER/.dmrc
 chown $ADMIN_USER:$ADMIN_USER /home/$ADMIN_USER/.dmrc
 chmod 644 /home/$ADMIN_USER/.dmrc
 
-# 10.8 Create pristine kiosk home template for stateless resets
+# Set permissions for kiosk user home before snapshotting
+chown -R $KIOSK_USER:$KIOSK_USER /home/$KIOSK_USER
+
+# 10.8 Create pristine kiosk home template NOW (after all files are placed)
 echo "Creating pristine kiosk home directory template..."
 rm -rf /opt/kiosk_template
 mkdir -p /opt/kiosk_template
 cp -a /home/$KIOSK_USER/. /opt/kiosk_template/
 
-
-# 11. Prevent manual desktop/session selection on the LightDM login screen
+# 11. Hide session chooser from greeter
 echo "Hiding desktop environment session chooser from login screen..."
 mkdir -p /etc/lightdm
 cat << EOF > /etc/lightdm/slick-greeter.conf
@@ -437,11 +431,8 @@ EOF
 echo "=== Setup Complete! ==="
 echo "The system is perfectly integrated. Reboot your computer to test the final kiosk installation."
 
-# Reboot countdown hook
 for i in {10..1}; do
     echo -ne "Rebooting in $i seconds... Press ANY KEY to cancel the reboot.\r"
-    
-    # -t 1 waits exactly 1 second for a single character input
     read -r -s -n 1 -t 1 key_pressed
     if [ $? -eq 0 ]; then
         echo -e "\n\n[!] Reboot canceled. You can now inspect the system or manually reboot later."

@@ -19,7 +19,7 @@ Create a copy of `setup-kiosk.sh` or edit it directly to point to your target we
 KIOSK_USER="kiosk"
 KIOSK_URL="https://your-target-url.com"
 KIOSK_NAV_POSITION="bottom-left" # Choices: top-left, top-right, bottom-left, bottom-right
-
+KIOSK_IDLE_MINUTES=10            # Inactivity timeout in minutes (0 to disable)
 # =================================================
 ```
 

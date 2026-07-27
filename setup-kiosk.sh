@@ -429,7 +429,6 @@ show-sessions=false
 EOF
 
 echo "=== Setup Complete! ==="
-echo "The system is perfectly integrated. Reboot your computer to test the final kiosk installation."
 
 for i in {10..1}; do
     echo -ne "Rebooting in $i seconds... Press ANY KEY to cancel the reboot.\r"
